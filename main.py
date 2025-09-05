@@ -186,8 +186,17 @@ if HAS_STREAMLIT:
 
         # 原反単価（CSV）
         df_genprice = pd.read_csv(REQ_GENCSV, encoding="utf-8")
-        if not set(["製品名","単価"]).issubset(df_genprice.columns):
-            err_stop("原反単価表.csv に必須列 '製品名','単価' がありません。")
+        # 列名ゆるく解決（全半角/記号違い・別名を吸収）
+        df_genprice.columns = [normalize_string(c) for c in df_genprice.columns]
+        prod_col = pick_col(df_genprice, ["製品名","品名","名称","中分類"])  # 製品名相当
+        price_col = pick_col(df_genprice, ["単価","単価(円/m)","原反単価","価格","金額"])  # 単価相当
+        if not prod_col or not price_col:
+            err_stop("原反単価表.csv に『製品名』『単価』相当の列が見つかりません。列名を確認してください。")
+        # 以降の処理で扱いやすいように標準名へリネーム
+        if prod_col != "製品名":
+            df_genprice = df_genprice.rename(columns={prod_col: "製品名"})
+        if price_col != "単価":
+            df_genprice = df_genprice.rename(columns={price_col: "単価"})
 
         # OPマスタ（任意・優先）
         if os.path.exists(REQ_OP):
@@ -432,12 +441,24 @@ if HAS_STREAMLIT:
     wcol   = pick_col(df_gen, ["原反幅(mm)","原反幅","幅","巾"]) or df_gen.columns[1]
     thcol  = pick_col(df_gen, ["厚み","厚さ","t"]) or name_g
 
-    if "製品名" not in df_genprice.columns:
-        err_stop("原反単価表.csv の『製品名』列が見つかりません。")
+    # df_genprice 側の列名を再確認（ロード時に標準化済みでも、念のため）
+    pname_csv = pick_col(df_genprice, ["製品名","品名","名称","中分類"]) or "製品名"
+    pcol_csv  = pick_col(df_genprice, ["単価","単価(円/m)","原反単価","価格","金額"]) or "単価"
 
-    _df = pd.merge(df_gen, df_genprice[["製品名","単価"]], on="製品名", how="left")
+    # df_gen 側に『単価』や同義列があると merge 後に suffix が付いて KeyError になるため回避
+    pcol_gen = pick_col(df_gen, ["単価","単価(円/m)","原反単価","価格","金額"])  # 任意
+    _g = df_gen.copy()
+    if pcol_gen:
+        _g = _g.rename(columns={pcol_gen: f"{pcol_gen}_GEN"})
+
+    dfp = df_genprice.rename(columns={pname_csv: "製品名", pcol_csv: "単価"})[["製品名","単価"]]
+    _df = pd.merge(_g, dfp, on="製品名", how="left")
+
+    # 単価の存在チェック
+    if "単価" not in _df.columns:
+        err_stop("原反単価の結合に失敗しました（列名の衝突または未検出）。CSVの列名をご確認ください。")
     if _df["単価"].isna().any():
-        miss = _df[_df["単価"].isna()]["製品名"].unique().tolist()
+        miss = _df[_df["単価"].isna()]["製品名"].dropna().unique().tolist()
         err_stop("原反単価表.csv に単価未登録の製品があります: " + ", ".join(map(str, miss[:10])) + (" ..." if len(miss)>10 else ""))
 
     df_gen_merged = _df
