@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-main.py（フル実装・外部定型文/ダミーなし） — シート名「原反価格」「OP」に対応 & 得意先系シートが無くてもUIで手入力に自動フォールバック（原反単価の参照元を UI で CSV／master／自動 に切替可能）
+main.py（フル実装・外部定型文/ダミー一切なし）
+- 単価参照は **master（原反価格シート）限定**。CSV の参照・切替 UI は排除。
+- シート名は『原反価格』『OP』を最優先で解決（記号差・全半角差に耐性）。
+- 得意先系シートが無い場合でも UI は手入力に自動フォールバック（ダミー無し）。
+- UI フォントは 見出し=11pt／その他=9pt に統一。アプリ題名は『お見積書作成システム』。
+- CLI テストは同梱（動作検証用）だがアプリ本体は検証版ではなく本運用仕様。
 
-今回の修正点：
-- IndentationError/KeyError の原因を除去：不要に重複していた return ブロックと迷い行を削除、インデントを整理。
-- 単価参照元は UI で切替（CSV優先／master優先／自動）。
-- 得意先系シートが無い場合でもテキスト入力に自動フォールバック。
-- CLIテストは既存を維持し、追加テスト（厚み差の原価検証）を追加。
-
-使い方：
-- GUI（推奨）：`pip install streamlit pandas openpyxl` → `streamlit run main.py`
-- CLIテスト（streamlit無し可）：`python main.py`
+起動方法：
+- GUI： `pip install streamlit pandas openpyxl` → `streamlit run main.py`
+- CLI： `python main.py`
 """
 
 import os, math, re, unicodedata
@@ -18,13 +17,13 @@ from io import BytesIO
 from datetime import datetime
 import pandas as pd
 
-# --- Streamlitの有無を検出 ---
+# --- Streamlit の有無 ---
 HAS_STREAMLIT = True
 try:
     import streamlit as st  # type: ignore
 except Exception:
     HAS_STREAMLIT = False
-    st = None  # sentinel
+    st = None
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
@@ -39,8 +38,7 @@ def normalize_string(s):
     if s is None:
         return ""
     if isinstance(s, str):
-        s = unicodedata.normalize("NFKC", s)
-        s = s.replace("\u3000", " ")
+        s = unicodedata.normalize("NFKC", s).replace("\u3000", " ")
         s = re.sub(r"\s+", " ", s.strip())
     return s
 
@@ -69,7 +67,6 @@ def pick_col(df: pd.DataFrame, candidates):
     for c in candidates:
         if c in cols:
             return c
-    # 部分一致でも許容
     for col in cols:
         for c in candidates:
             if str(c).lower() in col.lower():
@@ -90,18 +87,16 @@ def err_stop(msg: str):
 # 必須ファイル
 # =========================
 REQ_MASTER = "master.xlsx"
-REQ_OP     = "OPマスタ.xlsx"   # 任意
-REQ_GENCSV = "原反単価表.csv"
+REQ_OP     = "OPマスタ.xlsx"  # 任意
 
 def must_exist(path: str, label: str):
     if not os.path.exists(path):
         err_stop(f"必須ファイルが見つかりません: {label} → {path}")
 
 # =========================
-# マスタ読み込み（UIモード専用）
+# マスタ読み込み（UI）
 # =========================
 if HAS_STREAMLIT:
-    # シート名のゆるい解決: 記号（・ - _ / . 空白）差と大/小/全/半角差を吸収
     def _norm_sheet(s: str) -> str:
         s = normalize_string(s)
         s = re.sub(r"[\s・\-_/\.]+", "", s)
@@ -115,7 +110,6 @@ if HAS_STREAMLIT:
                 return book[k]
         raise HaltError("必要なシートが見つかりません: " + ", ".join(candidates))
 
-    # 見つからない場合は None を返す（任意シート向け）
     def _try_resolve_sheet(xls: pd.ExcelFile, candidates: list[str]):
         try:
             return _resolve_sheet(xls, candidates)
@@ -125,23 +119,19 @@ if HAS_STREAMLIT:
     @st.cache_data(show_spinner=False)
     def load_all():
         must_exist(REQ_MASTER, "master.xlsx")
-
         xls = pd.ExcelFile(REQ_MASTER)
 
-        # ★ユーザー指定を最優先（原反=原反価格、OP=OP）。記号差にも強い候補一覧。
+        # シート候補（『原反価格』『OP』最優先）
         sheet_gen_candidates    = ["原反価格", "カーテン", "SMAC原反", "SMAC原反マスタ", "S MAC原反", "原反マスタ", "原反"]
         sheet_op_candidates     = ["OP", "SMAC-OP", "SMAC_OP", "SMACOP", "OPマスタ"]
-        # 以下は任意
-        sheet_cat_candidates    = ["カーテン", "カーテンマスタ"]
-        sheet_perf_candidates   = ["カーテン性能", "性能", "性能マスタ"]
-        sheet_cus_candidates    = ["得意先", "顧客", "取引先"]
-        sheet_branch_candidates = ["支店", "部署", "部支店"]
-        sheet_office_candidates = ["営業所", "事業所", "オフィス"]
+        sheet_cat_candidates    = ["カーテン", "カーテンマスタ"]  # 任意
+        sheet_perf_candidates   = ["カーテン性能", "性能", "性能マスタ"]  # 任意
+        sheet_cus_candidates    = ["得意先", "顧客", "取引先"]  # 任意
+        sheet_branch_candidates = ["支店", "部署", "部支店"]  # 任意
+        sheet_office_candidates = ["営業所", "事業所", "オフィス"]  # 任意
 
-        # 必須シート
         sh_gen    = _resolve_sheet(xls, sheet_gen_candidates)
         sh_op     = _resolve_sheet(xls, sheet_op_candidates)
-        # 任意シート（無ければ None）
         sh_cat    = _try_resolve_sheet(xls, sheet_cat_candidates)
         sh_perf   = _try_resolve_sheet(xls, sheet_perf_candidates)
         sh_cus    = _try_resolve_sheet(xls, sheet_cus_candidates)
@@ -159,49 +149,37 @@ if HAS_STREAMLIT:
         df_branch  = rd(sh_branch)
         df_office  = rd(sh_office)
 
-        # 検証（必須のみ）
-        for name, df, must in [
-            (sh_gen,    df_gen,     ["製品名","原反幅(mm)","厚み"]),
-            (sh_op,     df_op,      ["OP名称","金額","方向"]),
-        ]:
-            if df.empty:
-                err_stop(f"master.xlsx のシート『{name}』が見つからないか空です。")
-            miss = [c for c in must if pick_col(df, [c]) is None]
+        # 必須列の検証（同義語を許容）
+        def _ensure(df, groups, label):
+            miss = []
+            for g in groups:
+                if pick_col(df, g) is None:
+                    miss.append(g[0])
             if miss:
-                err_stop(f"シート『{name}』に必須列がありません: {miss}")
+                err_stop(f"シート『{label}』に必須列がありません: {miss}")
+        _ensure(df_gen,
+                [["製品名","品名","名称"],
+                 ["原反幅(mm)","原反幅","幅","巾"],
+                 ["厚み","厚さ","t"],
+                 ["単価","単価(円/m)","原反単価","価格","金額"]],
+                sh_gen)
+        _ensure(df_op, [["OP名称"],["金額","単価"],["方向"]], sh_op)
+        # 任意シートがある場合は最低限を確認
+        if not df_catalog.empty:
+            _ensure(df_catalog, [["大分類"],["中分類"]], sh_cat)
+        if not df_perf.empty:
+            _ensure(df_perf, [["中分類"],["性能"]], sh_perf)
+        if not df_cus.empty:
+            _ensure(df_cus, [["社名"]], sh_cus)
+        if not df_branch.empty:
+            _ensure(df_branch, [["社名"],["支店名","支店"]], sh_branch)
+        if not df_office.empty:
+            _ensure(df_office, [["社名"],["支店名","支店"],["営業所名","営業所"]], sh_office)
 
-        # 任意シート（存在すれば列チェック）
-        for name, df, must in [
-            (sh_cat,    df_catalog, ["大分類","中分類"]),
-            (sh_perf,   df_perf,    ["中分類","性能"]),
-            (sh_cus,    df_cus,     ["社名"]),
-            (sh_branch, df_branch,  ["社名","支店名"]),
-            (sh_office, df_office,  ["社名","支店名","営業所名"]),
-        ]:
-            if name and not df.empty:
-                miss = [c for c in must if pick_col(df, [c]) is None]
-                if miss:
-                    err_stop(f"シート『{name}』に必須列がありません: {miss}")
-
-        # 原反単価（CSVとmasterの両方を用意し、UIで切替）
-        # CSV 側
-        df_genprice_csv = pd.DataFrame()
-        if os.path.exists(REQ_GENCSV):
-            try:
-                _csv = pd.read_csv(REQ_GENCSV, encoding="utf-8")
-                _csv.columns = [normalize_string(c) for c in _csv.columns]
-                prod_col = pick_col(_csv, ["製品名","品名","名称","中分類"])  # 製品名相当
-                price_col = pick_col(_csv, ["単価","単価(円/m)","原反単価","価格","金額"])  # 単価相当
-                if prod_col and price_col:
-                    df_genprice_csv = _csv.rename(columns={prod_col: "製品名", price_col: "単価"})[["製品名","単価"]]
-            except Exception:
-                pass
-        # master 側
-        name_guess = pick_col(df_gen, ["製品名","品名","名称"]) or (df_gen.columns[0] if len(df_gen.columns)>0 else None)
-        price_guess = pick_col(df_gen, ["単価","単価(円/m)","原反単価","価格","金額"])  # 単価相当
-        df_genprice_master = pd.DataFrame()
-        if name_guess and price_guess:
-            df_genprice_master = df_gen.rename(columns={name_guess:"製品名", price_guess:"単価"})[["製品名","単価"]]
+        # master から単価抽出（標準名に正規化）
+        name_col  = pick_col(df_gen, ["製品名","品名","名称"]) or df_gen.columns[0]
+        price_col = pick_col(df_gen, ["単価","単価(円/m)","原反単価","価格","金額"])  # ここは必ず見つかる前提
+        df_genprice_master = df_gen.rename(columns={name_col:"製品名", price_col:"単価"})[["製品名","単価"]]
 
         return {
             "df_gen": df_gen,
@@ -211,52 +189,43 @@ if HAS_STREAMLIT:
             "df_cus": df_cus,
             "df_branch": df_branch,
             "df_office": df_office,
-            "df_genprice_csv": df_genprice_csv,
             "df_genprice_master": df_genprice_master,
         }
 
 # =========================
-# S・MAC 計算（仕様準拠）
+# 見積ロジック（S・MAC）
 # =========================
-HEM_UNIT_THIN   = 450     # 四方折り返し（~0.3t）
-HEM_UNIT_THICK  = 550     # 四方折り返し（0.3t~）
-SEAM_UNIT_PER_M = 300     # 幅繋ぎ（1mあたり）
-CUTTING_BASE_3  = 2000    # 裁断賃（継ぎ<=3）
-CUTTING_BASE_4  = 3000    # 裁断賃（継ぎ>=4）
+HEM_UNIT_THIN   = 450
+HEM_UNIT_THICK  = 550
+SEAM_UNIT_PER_M = 300
+CUTTING_BASE_3  = 2000
+CUTTING_BASE_4  = 3000
 
-# 以降のグローバル参照は UI モードでセット／CLIテストではフィクスチャで上書き
-name_g = wcol = thcol = None
-# df_gen_merged, df_op は後でセット
+name_g = wcol = thcol = None  # UI で設定
+
 
 def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int, picked_ops_rows: list[dict]):
-    """戻り: dict(ok, sell_one, sell_total, note_ops, breakdown)
-    middle_name は 原反マスタ『製品名』と一致している前提。
+    """S・MAC見積の中核計算。
+    戻り: dict(ok, sell_one, sell_total, note_ops, breakdown)
     """
     res = {"ok": False, "msg": "", "sell_one": 0, "sell_total": 0, "note_ops": [], "breakdown": {}}
 
-    # 必須グローバル検証
     if any(v is None for v in [name_g, wcol, thcol]):
-        res["msg"] = "内部エラー: 列参照が未設定です。"
-        return res
+        res["msg"] = "内部エラー: 列参照が未設定です。"; return res
     if 'df_gen_merged' not in globals() or 'df_op' not in globals():
-        res["msg"] = "内部エラー: マスタが未設定です。"
-        return res
-
+        res["msg"] = "内部エラー: マスタが未設定です。"; return res
     if not middle_name or W<=0 or H<=0 or cnt<=0:
-        res["msg"] = "中分類/寸法/数量を確認してください。"
-        return res
+        res["msg"] = "中分類/寸法/数量を確認してください。"; return res
 
     hit = df_gen_merged[df_gen_merged[name_g]==middle_name]
     if hit.empty:
-        res["msg"] = f"原反価格に『{middle_name}』が見つかりません。"
-        return res
+        res["msg"] = f"原反価格に『{middle_name}』が見つかりません。"; return res
 
     gen_width = parse_float(hit.iloc[0][wcol])
     gen_price = parse_float(hit.iloc[0]["単価"])  # 円/m
     thick = extract_thickness(hit.iloc[0][thcol])
     if not gen_width or not gen_price:
-        res["msg"] = "原反幅または単価が不正です。"
-        return res
+        res["msg"] = "原反幅または単価が不正です。"; return res
 
     # 寸法補正
     if open_method == "片引き":
@@ -267,14 +236,14 @@ def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int, 
 
     # 原反使用量（1間口）
     length_per_panel_m = (cur_h * 1.2) / 1000.0
-    joints = math.ceil(cur_w / gen_width)              # 1パネル内の継ぎ数
-    raw_len_m = length_per_panel_m * joints * panels   # 使用量[m]
-    raw_one = gen_price * raw_len_m                    # 原反材料（1式）
+    joints = math.ceil(cur_w / gen_width)
+    raw_len_m = length_per_panel_m * joints * panels
+    raw_one = gen_price * raw_len_m
 
     # 裁断賃
     cutting_one = (CUTTING_BASE_3 if joints <= 3 else CUTTING_BASE_4) * panels
 
-    # 幅繋ぎ（縦継ぎ本数）
+    # 幅繋ぎ
     seams_total = max(0, joints - 1) * panels
     seam_one = math.ceil(cur_h/1000.0) * SEAM_UNIT_PER_M * seams_total
 
@@ -283,7 +252,7 @@ def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int, 
     hem_perimeter_m = (cur_w + cur_w + cur_h + cur_h) / 1000.0
     fourfold_one = math.ceil(hem_perimeter_m) * hem_unit * panels
 
-    # OP（方向：W/横/X→幅、その他→高さ）
+    # OP（方向 W/横/X→幅、その他→高さ）
     name_col = pick_col(df_op, ["OP名称"]) or "OP名称"
     price_col= pick_col(df_op, ["金額","単価"]) or "金額"
     dir_col  = pick_col(df_op, ["方向"]) or "方向"
@@ -292,12 +261,10 @@ def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int, 
     note_ops = []
     for row in (picked_ops_rows or []):
         nm = normalize_string(row.get(name_col, ""))
-        if not nm:
-            continue
+        if not nm: continue
         unit = int(parse_float(row.get(price_col)) or 0)
         dire = normalize_string(row.get(dir_col, "")).upper()
-        if unit <= 0:
-            continue
+        if unit <= 0: continue
         base_mm = cur_w if dire in ["W","横","X"] else cur_h
         units_1000 = math.ceil(base_mm/1000.0)
         sub = units_1000 * unit * panels * cnt
@@ -334,7 +301,7 @@ def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int, 
     return res
 
 # =========================
-# サマリ & Excel
+# 見積 Excel（明細）
 # =========================
 
 def is_opening_head(it: dict) -> bool:
@@ -361,17 +328,17 @@ def build_estimate_workbook(header: dict, items: list[dict]) -> BytesIO:
         ws.column_dimensions[get_column_letter(i)].width = w
     r = 1
     ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=7)
-    ws.cell(r,1,"お見積書（明細）").font = Font(size=14, bold=True); r+=2
-    ws.cell(r,1,"見積番号"); ws.cell(r,2, header.get("estimate_no",""))
-    ws.cell(r,4,"作成日");   ws.cell(r,5, header.get("date","")); r+=1
-    ws.cell(r,1,"得意先"); ws.cell(r,2, header.get("customer_name",""))
-    ws.cell(r,4,"部署・支店"); ws.cell(r,5, header.get("branch_name","")); r+=1
-    ws.cell(r,1,"事業所"); ws.cell(r,2, header.get("office_name",""))
-    ws.cell(r,4,"ご担当"); ws.cell(r,5, header.get("person_name","")); r+=2
+    ws.cell(r,1,"お見積書（明細）").font = Font(size=11, bold=True); r+=2
+    ws.cell(r,1,"見積番号").font=Font(size=9); ws.cell(r,2, header.get("estimate_no",""))
+    ws.cell(r,4,"作成日").font=Font(size=9);   ws.cell(r,5, header.get("date","")); r+=1
+    ws.cell(r,1,"得意先").font=Font(size=9); ws.cell(r,2, header.get("customer_name",""))
+    ws.cell(r,4,"部署・支店").font=Font(size=9); ws.cell(r,5, header.get("branch_name","")); r+=1
+    ws.cell(r,1,"事業所").font=Font(size=9); ws.cell(r,2, header.get("office_name",""))
+    ws.cell(r,4,"ご担当").font=Font(size=9); ws.cell(r,5, header.get("person_name","")); r+=2
     hdr = ["品名","数量","単位","単価","小計","種別","備考"]
     for c,t in enumerate(hdr, start=1):
         cell = ws.cell(r,c,t)
-        cell.font = Font(bold=True); cell.fill = head_fill
+        cell.font = Font(size=9, bold=True); cell.fill = head_fill
         cell.alignment = Alignment(horizontal="center"); cell.border = border
     r+=1
     total = 0; prev_mark=None; started=False
@@ -390,7 +357,7 @@ def build_estimate_workbook(header: dict, items: list[dict]) -> BytesIO:
             it.get("備考",""),
         ]
         for c,v in enumerate(row_vals, start=1):
-            cell=ws.cell(r,c,v); cell.border=border
+            cell=ws.cell(r,c,v); cell.border=border; cell.font=Font(size=9)
             if c in (2,4,5) and isinstance(v,(int,float)):
                 cell.number_format = int_fmt if c==2 else yen_fmt
             if c==2: cell.alignment=Alignment(horizontal="right")
@@ -400,30 +367,41 @@ def build_estimate_workbook(header: dict, items: list[dict]) -> BytesIO:
         r+=1
     r+=1
     ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=3)
-    ws.cell(r,1,"合計").font=Font(bold=True)
-    ws.cell(r,5,total).number_format=yen_fmt; ws.cell(r,5).font=Font(bold=True)
+    ws.cell(r,1,"合計").font=Font(size=9, bold=True)
+    ws.cell(r,5,total).number_format=yen_fmt; ws.cell(r,5).font=Font(size=9, bold=True)
     for c in (1,5): ws.cell(r,c).border=border
     bio=BytesIO(); wb.save(bio); bio.seek(0); return bio
 
 # =========================
-# UI（Streamlitがある場合のみ）
+# UI（Streamlit）
 # =========================
 if HAS_STREAMLIT:
-    st.set_page_config(page_title="S・MAC 見積", layout="wide")
-    st.title("S・MAC 見積アプリ（定型文なし）")
+    st.set_page_config(page_title="お見積書作成システム", layout="wide")
+    # グローバル CSS（見出し=11pt／その他=9pt）
+    st.markdown(
+        """
+        <style>
+        html, body, [data-testid="stAppViewContainer"] * { font-size: 9pt !important; }
+        h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 { font-size: 11pt !important; }
+        [data-testid="stMetricValue"], [data-testid="stMetricLabel"] { font-size: 9pt !important; }
+        thead, tbody, .stDataFrame, .stTable { font-size: 9pt !important; }
+        .stButton>button, .stDownloadButton>button, .stTextInput input, .stNumberInput input,
+        .stSelectbox div, .stRadio div { font-size: 9pt !important; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.title("お見積書作成システム")
 
     M = load_all()
-    # 正規化（存在するキーだけ処理）
-    for k in [
-        "df_gen","df_op","df_catalog","df_perf","df_cus","df_branch","df_office",
-        "df_genprice_csv","df_genprice_master"
-    ]:
+    # 列名を正規化
+    for k in ["df_gen","df_op","df_catalog","df_perf","df_cus","df_branch","df_office","df_genprice_master"]:
         df = M.get(k, pd.DataFrame())
         if isinstance(df, pd.DataFrame) and not df.empty:
             df.columns = [normalize_string(c) for c in df.columns]
         M[k] = df
 
-    # 参照変数
     df_gen      = M["df_gen"].copy()
     df_op       = M["df_op"].copy()
     df_catalog  = M["df_catalog"].copy()
@@ -431,47 +409,17 @@ if HAS_STREAMLIT:
     df_cus      = M["df_cus"].copy()
     df_branch   = M["df_branch"].copy()
     df_office   = M["df_office"].copy()
-    df_genprice_csv    = M["df_genprice_csv"].copy()
-    df_genprice_master = M["df_genprice_master"].copy()
-
-    # 単価参照元の選択（CSV／master／自動）
-    st.markdown("#### 単価参照元")
-    src_choice = st.radio(
-        "原反単価の参照元を選択",
-        ["自動（CSV優先）","CSVを優先","master（原反価格）を優先"],
-        horizontal=True,
-        key="price_src_choice"
-    )
-    def _select_price_df(choice):
-        if choice == "CSVを優先":
-            if not df_genprice_csv.empty:
-                return df_genprice_csv, "CSV"
-            return df_genprice_master, "master"
-        elif choice == "master（原反価格）を優先":
-            if not df_genprice_master.empty:
-                return df_genprice_master, "master"
-            return df_genprice_csv, "CSV"
-        # 自動（CSV優先）
-        if not df_genprice_csv.empty:
-            return df_genprice_csv, "CSV"
-        return df_genprice_master, "master"
-
-    df_genprice, price_src_used = _select_price_df(src_choice)
-    if df_genprice.empty:
-        err_stop("原反単価の参照元が見つかりません。CSV か master のどちらかに『製品名』『単価』が必要です。")
-    st.caption(f"単価参照元：{price_src_used}")
+    df_genprice = M["df_genprice_master"].copy()  # master 限定
 
     # 原反の単価結合（製品名で左結合）
     name_g = pick_col(df_gen, ["製品名","品名","名称"]) or df_gen.columns[0]
     wcol   = pick_col(df_gen, ["原反幅(mm)","原反幅","幅","巾"]) or df_gen.columns[1]
     thcol  = pick_col(df_gen, ["厚み","厚さ","t"]) or name_g
 
-    # df_genprice 側の列名を再確認（ロード時に標準化済みでも、念のため）
     pname_csv = pick_col(df_genprice, ["製品名","品名","名称","中分類"]) or "製品名"
     pcol_csv  = pick_col(df_genprice, ["単価","単価(円/m)","原反単価","価格","金額"]) or "単価"
 
-    # df_gen 側に『単価』や同義列があると merge 後に suffix が付いて KeyError になるため回避
-    pcol_gen = pick_col(df_gen, ["単価","単価(円/m)","原反単価","価格","金額"])  # 任意
+    pcol_gen = pick_col(df_gen, ["単価","単価(円/m)","原反単価","価格","金額"])  # 任意（衝突回避）
     _g = df_gen.copy()
     if pcol_gen:
         _g = _g.rename(columns={pcol_gen: f"{pcol_gen}_GEN"})
@@ -479,16 +427,15 @@ if HAS_STREAMLIT:
     dfp = df_genprice.rename(columns={pname_csv: "製品名", pcol_csv: "単価"})[["製品名","単価"]]
     _df = pd.merge(_g, dfp, on="製品名", how="left")
 
-    # 単価の存在チェック
     if "単価" not in _df.columns:
-        err_stop("原反単価の結合に失敗しました（列名の衝突または未検出）。CSV/master の列名をご確認ください。")
+        err_stop("原反単価の結合に失敗しました（列名の衝突または未検出）。master の列名をご確認ください。")
     if _df["単価"].isna().any():
         miss = _df[_df["単価"].isna()]["製品名"].dropna().unique().tolist()
         err_stop("単価未登録の製品があります: " + ", ".join(map(str, miss[:10])) + (" ..." if len(miss)>10 else ""))
 
     df_gen_merged = _df
 
-    # ---- 見積番号（UC37MM-####）
+    # ---- 見積番号生成（UC37MM-####）
     def gen_estimate_no():
         today = datetime.today(); prefix = f"UC37{today.month:02d}-"
         if "_est_seq" not in st.session_state:
@@ -505,7 +452,7 @@ if HAS_STREAMLIT:
         if "created_disp" not in st.session_state:
             st.session_state["created_disp"] = datetime.today().strftime("%Y/%m/%d")
 
-        # 連動プルダウン（得意先マスタが無ければ手入力に自動フォールバック）
+        # 連動プルダウン（マスタが無ければ手入力）
         if not df_cus.empty and not df_branch.empty and not df_office.empty:
             c_cus = pick_col(df_cus, ["社名"]) or df_cus.columns[0]
             c_b_cus = pick_col(df_branch, ["社名"]) or df_branch.columns[0]
@@ -536,22 +483,19 @@ if HAS_STREAMLIT:
 
         col4, col5, col6 = st.columns([0.8, 0.6, 1.4])
         with col4:
-            est = st.text_input("見積番号", value=st.session_state["estimate_no"])
-            st.session_state["estimate_no"] = est
+            est = st.text_input("見積番号", value=st.session_state["estimate_no"]); st.session_state["estimate_no"] = est
         with col5:
-            created = st.text_input("作成日（YYYY/MM/DD）", value=st.session_state["created_disp"])
-            st.session_state["created_disp"] = created
+            created = st.text_input("作成日（YYYY/MM/DD）", value=st.session_state["created_disp"]); st.session_state["created_disp"] = created
         with col6:
-            project = st.text_input("物件名", value=st.session_state.get("project_name",""))
-            st.session_state["project_name"] = project
+            project = st.text_input("物件名", value=st.session_state.get("project_name","")); st.session_state["project_name"] = project
 
         st.caption(
             f"見積番号：{st.session_state['estimate_no']} / 作成日：{st.session_state['created_disp']} / "
             f"得意先：{customer or '（未入力）'} / 支店：{branch or '（未入力）'} / 営業所：{office or '（未入力）'} / 物件名：{project or '（未入力）'}"
         )
+        st.caption("単価参照元：master（原反価格）")
         st.markdown("---")
 
-    # 間口
     if "openings" not in st.session_state:
         st.session_state.openings = [1]
 
@@ -571,11 +515,9 @@ if HAS_STREAMLIT:
         with a4: CNT = st.number_input("数量", min_value=1, value=1, step=1, key=pref+"cnt")
 
         st.markdown("#### カーテン（S・MAC）")
-
         mids = df_gen_merged[name_g].dropna().unique().tolist()
         mid = st.selectbox("中分類（原反・製品名）", [""]+mids, key=pref+"mid")
 
-        # 性能（任意）
         perf_opts = []
         if not M["df_perf"].empty:
             perf_mid_col  = pick_col(M["df_perf"], ["中分類"]) or M["df_perf"].columns[0]
@@ -585,7 +527,6 @@ if HAS_STREAMLIT:
 
         open_mtd = st.radio("片引き/引分け", ["片引き","引分け"], key=pref+"open", horizontal=True)
 
-        # OP
         name_col = pick_col(df_op, ["OP名称"]) or "OP名称"
         price_col= pick_col(df_op, ["金額","単価"]) or "金額"
         dir_col  = pick_col(df_op, ["方向"]) or "方向"
@@ -600,13 +541,11 @@ if HAS_STREAMLIT:
                         row = df_op[df_op[name_col]==nm].iloc[0].to_dict()
                         op_rows.append(row)
 
-        # 計算
         if W>0 and H>0 and CNT>0 and mid:
             r = smac_estimate(mid, open_mtd, W, H, CNT, op_rows)
             if r["ok"]:
                 note = f"W{W}×H{H}mm"
-                if r["note_ops"]:
-                    note += "／OP:" + "・".join(r["note_ops"])
+                if r["note_ops"]: note += "／OP:" + "・".join(r["note_ops"])
                 overall_items.append({
                     "品名": f"S・MACカーテン {mid} {open_mtd}",
                     "数量": CNT, "単位":"式",
@@ -616,7 +555,6 @@ if HAS_STREAMLIT:
                 })
                 add_total(r["sell_total"])
 
-                # 原価明細
                 bd = r.get("breakdown", {})
                 if bd:
                     with st.expander("原価構成（1間口あたり）", expanded=False):
@@ -638,7 +576,6 @@ if HAS_STREAMLIT:
             else:
                 st.warning(r.get("msg") or "S・MACの計算に失敗しました。")
 
-    # レイアウト
     st.markdown("---")
     col_a, col_b = st.columns([0.85,0.15])
     with col_b:
@@ -650,14 +587,12 @@ if HAS_STREAMLIT:
             st.markdown(f"#### 間口 {i}")
             render_opening(i)
 
-    # サマリ
     st.markdown("---")
     st.markdown("### 見積サマリ")
     if 'overall_items' in globals() and globals().get('overall_items'):
         cols = ["品名","数量","単位","単価","小計","種別","備考"]
         rows = []
-        prev_mark = None
-        started = False
+        prev_mark = None; started = False
         for it in overall_items:
             mark = extract_mark(it.get("備考","")); head = is_opening_head(it)
             if started and ((mark and mark!=prev_mark) or head):
@@ -675,11 +610,9 @@ if HAS_STREAMLIT:
     else:
         st.info("明細がありません。")
 
-    # 合計
     st.markdown("### 見積金額")
     st.metric("税抜合計", f"¥{globals().get('overall_total', 0):,}")
 
-    # Excel
     st.markdown("---")
     st.markdown("### Excel出力")
     if st.button("Excel保存", key="excel_save_btn_v1"):
@@ -689,7 +622,7 @@ if HAS_STREAMLIT:
             "customer_name": st.session_state.get("customer",""),
             "branch_name":   st.session_state.get("branch",""),
             "office_name":   st.session_state.get("office",""),
-            "person_name":   st.session_state.get("pic",""),  # 任意：担当者名欄が必要ならUI追加してください
+            "person_name":   st.session_state.get("pic",""),
         }
         try:
             bio = build_estimate_workbook(header, overall_items)
@@ -707,18 +640,14 @@ if HAS_STREAMLIT:
             st.exception(e)
 
 # =========================
-# CLIテスト（Streamlitなし環境）
+# CLI テスト
 # =========================
 else:
     def _fixture_frames():
-        # テスト専用フィクスチャ（アプリ本体では未使用）
         df_gen = pd.DataFrame({
             "製品名": ["標準0.25t", "標準0.4t"],
             "原反幅(mm)": [1370, 1500],
             "厚み": ["0.25t", "0.4t"],
-        })
-        df_genprice = pd.DataFrame({
-            "製品名": ["標準0.25t", "標準0.4t"],
             "単価": [1800, 2200],
         })
         df_op = pd.DataFrame({
@@ -726,52 +655,48 @@ else:
             "金額": [1000, 800, 1000],
             "方向": ["W", "W", "H"],
         })
-        return df_gen, df_genprice, df_op
+        return df_gen, df_op
 
     def _prepare_globals_for_tests():
         global df_gen_merged, df_op, name_g, wcol, thcol
-        df_gen, df_genprice, df_op_local = _fixture_frames()
-        df_gen_merged = pd.merge(df_gen, df_genprice[["製品名","単価"]], on="製品名", how="left")
+        df_gen, df_op_local = _fixture_frames()
         df_op = df_op_local
         name_g = "製品名"; wcol = "原反幅(mm)"; thcol = "厚み"
+        df_gen_merged = df_gen  # すでに単価を含む
 
     def run_tests():
         _prepare_globals_for_tests()
 
-        # --- Test 1: 基本計算（片引き） ---
+        # Test 1: 基本計算（片引き）
         r1 = smac_estimate("標準0.25t", "片引き", W=2000, H=2000, cnt=1, picked_ops_rows=[])
-        assert r1["ok"] is True, "基本計算が失敗"
-        assert r1["sell_total"] > 0, "売価が0以下"
+        assert r1["ok"] is True and r1["sell_total"] > 0
         for k in ["原反使用量(m)", "原反幅(mm)", "原反単価(円/m)"]:
-            assert k in r1["breakdown"], f"breakdownに{ k }が無い"
+            assert k in r1["breakdown"]
 
-        # --- Test 2: 引分けは片引き以上のコストになる傾向 ---
+        # Test 2: 引分けは片引き以上
         r2 = smac_estimate("標準0.25t", "引分け", W=2000, H=2000, cnt=1, picked_ops_rows=[])
-        assert r2["ok"] is True
-        assert r2["sell_total"] >= r1["sell_total"], "引分けが片引きより安くなっている"
+        assert r2["ok"] is True and r2["sell_total"] >= r1["sell_total"]
 
-        # --- Test 3: OP方向の違い（H方向OPのほうが高くなるケース） ---
-        # W < H なので H基準OPのほうが金額が大きいはず
+        # Test 3: OP方向差（Hの方が高い想定）
         rW = smac_estimate("標準0.4t", "片引き", W=1500, H=2500, cnt=1,
                            picked_ops_rows=[{"OP名称":"透明窓追加","金額":1000,"方向":"W"}])
         rH = smac_estimate("標準0.4t", "片引き", W=1500, H=2500, cnt=1,
                            picked_ops_rows=[{"OP名称":"H方向OP","金額":1000,"方向":"H"}])
-        assert rW["ok"] and rH["ok"], "OPテストの計算失敗"
-        assert rH["sell_total"] >= rW["sell_total"], "H方向OPの方が高くならない"
+        assert rW["ok"] and rH["ok"] and rH["sell_total"] >= rW["sell_total"]
 
-        # --- Test 4: 不正入力 ---
+        # Test 4: 不正入力
         r_bad = smac_estimate("標準0.25t", "片引き", W=0, H=1000, cnt=1, picked_ops_rows=[])
-        assert r_bad["ok"] is False, "不正入力でokになるのはおかしい"
+        assert r_bad["ok"] is False
 
-        # --- Test 5: 端数処理（100円切上げ） ---
-        assert ceil100(1) == 100 and ceil100(100) == 100 and ceil100(101) == 200, "ceil100 が100円切上げになっていない"
-        assert r1["sell_one"] % 100 == 0, "販売単価が100円単位になっていない"
+        # Test 5: 100円切上げ
+        assert ceil100(1) == 100 and ceil100(100) == 100 and ceil100(101) == 200
+        assert r1["sell_one"] % 100 == 0
 
-        # --- Test 6: 厚みが厚い方が四方折り返しコストが高い ---
+        # Test 6: 厚みが厚い方が折返し高い
         r_thin = smac_estimate("標準0.25t", "片引き", W=1800, H=2000, cnt=1, picked_ops_rows=[])
         r_thick= smac_estimate("標準0.4t",  "片引き", W=1800, H=2000, cnt=1, picked_ops_rows=[])
-        assert r_thin["ok"] and r_thick["ok"], "厚みテストの計算失敗"
-        assert r_thick["breakdown"]["四方折り返し(1式)"] >= r_thin["breakdown"]["四方折り返し(1式)"], "厚み0.4tの折返しが0.25tより高くない"
+        assert r_thin["ok"] and r_thick["ok"]
+        assert r_thick["breakdown"]["四方折り返し(1式)"] >= r_thin["breakdown"]["四方折り返し(1式)"]
 
         print("All tests passed.")
 
