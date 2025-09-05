@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-main.py（フル実装・外部定型文/ダミー一切なし） — Streamlit未インストール環境/サンドボックスでも落ちないように改修
+main.py（フル実装・外部定型文/ダミーなし） — シート名「カーテン」「OP」に対応 & Streamlit無でも落ちない
 
-変更点（今回の修正）：
-- **SystemExit: 0** が発生しないように、CLIテスト実行部の `sys.exit(...)` 呼び出しをすべて排除。
-- 既存テストは維持しつつ、**端数処理（100円切上げ）** の追加テストを実装。
-- Streamlit が無い環境でも ImportError にならず、UI 部分は自動スキップ、計算ロジックのテストだけを実行。
+今回の修正点：
+- master.xlsx の原反マスタが **「カーテン」**、OPマスタが **「OP」** にある前提を最優先で解決するよう変更。
+- シート名突合は記号差（・ - _ / . と空白）、全半角、大/小文字差を吸収して照合。
+- Streamlit 未導入環境では UI をスキップし、**CLIテスト**を実行（`sys.exit` は一切使わない）。
+- 既存テスト維持＋**端数処理の追加テスト**を搭載。
 
 使い方：
-- GUIモード（推奨）: `pip install streamlit pandas openpyxl` → `streamlit run main.py`
-- CLIテスト（streamlit無し可）: `python main.py`（プロセスは正常終了し、SystemExit 例外は発生しません）
+- GUI（推奨）：`pip install streamlit pandas openpyxl` → `streamlit run main.py`
+- CLIテスト（streamlit無し可）：`python main.py`
 """
 
 import os, math, re, unicodedata
@@ -75,7 +76,7 @@ def pick_col(df: pd.DataFrame, candidates):
                 return col
     return None
 
-# Streamlit有無で共通のエラー処理
+# 共通エラー
 class HaltError(RuntimeError):
     pass
 
@@ -86,7 +87,7 @@ def err_stop(msg: str):
     raise HaltError(msg)
 
 # =========================
-# 必須ファイル（UIモードのみ）
+# 必須ファイル
 # =========================
 REQ_MASTER = "master.xlsx"
 REQ_OP     = "OPマスタ.xlsx"   # 任意
@@ -100,32 +101,64 @@ def must_exist(path: str, label: str):
 # マスタ読み込み（UIモード専用）
 # =========================
 if HAS_STREAMLIT:
+    # シート名のゆるい解決: 記号（・ - _ / . 空白）差と大/小/全/半角差を吸収
+    def _norm_sheet(s: str) -> str:
+        s = normalize_string(s)
+        s = re.sub(r"[\s・\-_/\.]+", "", s)
+        return s.upper()
+
+    def _resolve_sheet(xls: pd.ExcelFile, candidates: list[str]) -> str:
+        target = {_norm_sheet(c): c for c in candidates}
+        book = {_norm_sheet(n): n for n in xls.sheet_names}
+        for k in target:
+            if k in book:
+                return book[k]
+        raise HaltError("必要なシートが見つかりません: " + ", ".join(candidates))
+
     @st.cache_data(show_spinner=False)
     def load_all():
         must_exist(REQ_MASTER, "master.xlsx")
         must_exist(REQ_GENCSV, "原反単価表.csv")
 
         xls = pd.ExcelFile(REQ_MASTER)
-        def rd(name):
-            return pd.read_excel(REQ_MASTER, sheet_name=name) if name in xls.sheet_names else pd.DataFrame()
 
-        df_gen     = rd("S・MAC原反")
-        df_op      = rd("S・MAC-OP")
-        df_catalog = rd("カーテン")
-        df_perf    = rd("カーテン性能")
-        df_cus     = rd("得意先")
-        df_branch  = rd("支店")
-        df_office  = rd("営業所")
+        # ★ユーザー指定を最優先（原反=カーテン、OP=OP）。記号差にも強い候補一覧。
+        sheet_gen_candidates    = ["カーテン", "SMAC原反", "SMAC原反マスタ", "S MAC原反", "SMAC原反候補", "原反マスタ", "原反"]
+        sheet_op_candidates     = ["OP", "SMAC-OP", "SMAC_OP", "SMACOP", "OPマスタ"]
+        sheet_cat_candidates    = ["カーテン", "カーテンマスタ"]
+        sheet_perf_candidates   = ["カーテン性能", "性能", "性能マスタ"]
+        sheet_cus_candidates    = ["得意先", "顧客", "取引先"]
+        sheet_branch_candidates = ["支店", "部署", "部支店"]
+        sheet_office_candidates = ["営業所", "事業所", "オフィス"]
+
+        sh_gen    = _resolve_sheet(xls, sheet_gen_candidates)
+        sh_op     = _resolve_sheet(xls, sheet_op_candidates)
+        sh_cat    = _resolve_sheet(xls, sheet_cat_candidates)
+        sh_perf   = _resolve_sheet(xls, sheet_perf_candidates)
+        sh_cus    = _resolve_sheet(xls, sheet_cus_candidates)
+        sh_branch = _resolve_sheet(xls, sheet_branch_candidates)
+        sh_office = _resolve_sheet(xls, sheet_office_candidates)
+
+        def rd(name):
+            return pd.read_excel(REQ_MASTER, sheet_name=name)
+
+        df_gen     = rd(sh_gen)
+        df_op      = rd(sh_op)
+        df_catalog = rd(sh_cat)
+        df_perf    = rd(sh_perf)
+        df_cus     = rd(sh_cus)
+        df_branch  = rd(sh_branch)
+        df_office  = rd(sh_office)
 
         # 最低限の検証
         for name, df, must in [
-            ("S・MAC原反", df_gen,     ["製品名","原反幅(mm)","厚み"]),
-            ("S・MAC-OP", df_op,      ["OP名称","金額","方向"]),
-            ("カーテン",   df_catalog, ["大分類","中分類"]),
-            ("カーテン性能", df_perf,  ["中分類","性能"]),
-            ("得意先",     df_cus,    ["社名"]),
-            ("支店",       df_branch, ["社名","支店名"]),
-            ("営業所",     df_office, ["社名","支店名","営業所名"]),
+            (sh_gen,    df_gen,     ["製品名","原反幅(mm)","厚み"]),
+            (sh_op,     df_op,      ["OP名称","金額","方向"]),
+            (sh_cat,    df_catalog, ["大分類","中分類"]),
+            (sh_perf,   df_perf,    ["中分類","性能"]),
+            (sh_cus,    df_cus,     ["社名"]),
+            (sh_branch, df_branch,  ["社名","支店名"]),
+            (sh_office, df_office,  ["社名","支店名","営業所名"]),
         ]:
             if df.empty:
                 err_stop(f"master.xlsx のシート『{name}』が見つからないか空です。")
@@ -141,13 +174,16 @@ if HAS_STREAMLIT:
         # OPマスタ（任意・優先）
         if os.path.exists(REQ_OP):
             xls_op = pd.ExcelFile(REQ_OP)
-            if "S・MAC-OP" in xls_op.sheet_names:
-                df_op2 = pd.read_excel(REQ_OP, sheet_name="S・MAC-OP")
+            try:
+                sh_op2 = _resolve_sheet(xls_op, sheet_op_candidates)
+                df_op2 = pd.read_excel(REQ_OP, sheet_name=sh_op2)
                 if not df_op2.empty:
                     name_col = pick_col(df_op2, ["OP名称"]) or df_op2.columns[0]
-                    df_op = pd.concat([df_op2, df_op], ignore_index=True)
-                    if name_col in df_op.columns:
-                        df_op = df_op.drop_duplicates(subset=[name_col], keep="first")
+                    df_tmp = pd.concat([df_op2, df_op], ignore_index=True)
+                    if name_col in df_tmp.columns:
+                        df_op = df_tmp.drop_duplicates(subset=[name_col], keep="first")
+            except HaltError:
+                pass
 
         return {
             "df_gen": df_gen,
@@ -175,7 +211,7 @@ name_g = wcol = thcol = None
 
 def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int, picked_ops_rows: list[dict]):
     """戻り: dict(ok, sell_one, sell_total, note_ops, breakdown)
-    middle_name は S・MAC原反『製品名』と一致している前提。
+    middle_name は 原反マスタ『製品名』と一致している前提。
     """
     res = {"ok": False, "msg": "", "sell_one": 0, "sell_total": 0, "note_ops": [], "breakdown": {}}
 
@@ -355,7 +391,7 @@ def build_estimate_workbook(header: dict, items: list[dict]) -> BytesIO:
 # =========================
 if HAS_STREAMLIT:
     st.set_page_config(page_title="S・MAC 見積", layout="wide")
-    st.title("S・MAC 見積アプリ（外部定型文・ダミー無し）")
+    st.title("S・MAC 見積アプリ（定型文なし）")
 
     M = load_all()
     # 正規化
@@ -450,7 +486,6 @@ if HAS_STREAMLIT:
     overall_total = 0
 
     def add_total(v):
-        nonlocal_var = int(v or 0)  # noqa: F841 (for clarity)
         globals()["overall_total"] = globals().get("overall_total", 0) + int(v or 0)
 
     def render_opening(idx: int):
@@ -654,15 +689,12 @@ else:
         assert r_bad["ok"] is False, "不正入力でokになるのはおかしい"
 
         # --- Test 5: 端数処理（100円切上げ） ---
-        # 任意の数値で ceil100 の性質を確認
         assert ceil100(1) == 100 and ceil100(100) == 100 and ceil100(101) == 200, "ceil100 が100円切上げになっていない"
-        # 売単価が必ず100円単位になること
         assert r1["sell_one"] % 100 == 0, "販売単価が100円単位になっていない"
 
         print("All tests passed.")
 
     if __name__ == "__main__":
-        # 例外は握り潰さずに表示のみ。SystemExitは使わない（CIやホストが例外をエラー扱いしないようにする）。
         try:
             run_tests()
         except AssertionError as e:
