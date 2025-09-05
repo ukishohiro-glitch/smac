@@ -525,7 +525,7 @@ def render_opening(idx: int):
                     "単価": sm["sell_one"],
                     "小計": sm["sell_total"],
                     "種別": "S・MAC",
-                    "備考": (f"符号:{mark}／" if mark else "") + note
+                    "備考": (f"符号:{mark}／" if mark else "") + note,
                     "間口": idx,   # ← これを辞書の中に追加
 
                 })
