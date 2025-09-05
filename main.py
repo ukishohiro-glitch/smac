@@ -3,9 +3,10 @@
 main.py（フル実装・外部定型文/ダミー一切なし）
 - 単価参照は **master（原反価格シート）限定**。CSV の参照・切替 UI は排除。
 - シート名は『原反価格』『OP』を最優先で解決（記号差・全半角差に耐性）。
-- 得意先系シートが無い場合でも UI は手入力に自動フォールバック（ダミー無し）。
+- 得意先は『社名/支店/営業所』を**個別に**プルダウン化（存在するマスタだけ利用）。無い要素は自動で手入力にフォールバック。
 - UI フォントは 見出し=11pt／その他=9pt に統一。アプリ題名は『お見積書作成システム』。
-- CLI テストは同梱（動作検証用）だがアプリ本体は検証版ではなく本運用仕様。
+- S・MAC見積に加えて、**部材（任意品）入力**セクションを追加（行追加、数量×単価で小計、サマリ/Excelに反映）。
+- CLI テストは同梱（本運用仕様の安全網）。
 
 起動方法：
 - GUI： `pip install streamlit pandas openpyxl` → `streamlit run main.py`
@@ -164,7 +165,6 @@ if HAS_STREAMLIT:
                  ["単価","単価(円/m)","原反単価","価格","金額"]],
                 sh_gen)
         _ensure(df_op, [["OP名称"],["金額","単価"],["方向"]], sh_op)
-        # 任意シートがある場合は最低限を確認
         if not df_catalog.empty:
             _ensure(df_catalog, [["大分類"],["中分類"]], sh_cat)
         if not df_perf.empty:
@@ -299,6 +299,37 @@ def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int, 
         }
     })
     return res
+
+# =========================
+# 部材（任意品）ロジック
+# =========================
+
+def build_material_items(rows: list[dict]):
+    """部材行から明細（品名/数量/単位/単価/小計/備考/種別）を生成。戻り: (items, total)"""
+    items = []
+    total = 0
+    for r in rows:
+        name = normalize_string(r.get("品名", ""))
+        if not name:
+            continue
+        qty  = int(parse_float(r.get("数量")) or 0)
+        unit = normalize_string(r.get("単位", "")) or "個"
+        price= int(parse_float(r.get("単価")) or 0)
+        note = normalize_string(r.get("備考", ""))
+        if qty <= 0 or price <= 0:
+            continue
+        sub = qty * price
+        items.append({
+            "品名": name,
+            "数量": qty,
+            "単位": unit,
+            "単価": price,
+            "小計": sub,
+            "種別": "部材",
+            "備考": note,
+        })
+        total += sub
+    return items, total
 
 # =========================
 # 見積 Excel（明細）
@@ -443,6 +474,16 @@ if HAS_STREAMLIT:
         st.session_state["_est_seq"] += 1
         return prefix + f"{st.session_state['_est_seq']%10000:04d}"
 
+    # 共通：既存値に基づき index を算出する selectbox ヘルパ
+    def _selectbox_or_text(label: str, options: list, key: str):
+        options = options or []
+        if options:
+            cur = st.session_state.get(key)
+            idx = options.index(cur) if (cur in options) else 0
+            return st.selectbox(label, options, index=idx, key=key)
+        else:
+            return st.text_input(label, value=st.session_state.get(key, ""), key=key)
+
     with st.container():
         st.markdown("---")
         st.markdown("### 得意先情報入力")
@@ -452,34 +493,34 @@ if HAS_STREAMLIT:
         if "created_disp" not in st.session_state:
             st.session_state["created_disp"] = datetime.today().strftime("%Y/%m/%d")
 
-        # 連動プルダウン（マスタが無ければ手入力）
-        if not df_cus.empty and not df_branch.empty and not df_office.empty:
-            c_cus = pick_col(df_cus, ["社名"]) or df_cus.columns[0]
-            c_b_cus = pick_col(df_branch, ["社名"]) or df_branch.columns[0]
-            c_b = pick_col(df_branch, ["支店名","支店"]) or df_branch.columns[1]
-            c_o_cus = pick_col(df_office, ["社名"]) or df_office.columns[0]
-            c_o_b = pick_col(df_office, ["支店名","支店"]) or df_office.columns[1]
-            c_o = pick_col(df_office, ["営業所名","営業所"]) or df_office.columns[2]
-
-            cus_list = df_cus[c_cus].dropna().unique().tolist()
-
-            col1, col2, col3 = st.columns([1.0, 1.0, 1.0])
-            with col1:
-                customer = st.selectbox("社名（得意先名）", cus_list, index=0 if cus_list else None, key="customer")
-            with col2:
-                branches = df_branch[df_branch[c_b_cus]==customer][c_b].dropna().unique().tolist()
-                branch = st.selectbox("支店名", branches, index=0 if branches else None, key="branch")
-            with col3:
-                offices = df_office[(df_office[c_o_cus]==customer) & (df_office[c_o_b]==branch)][c_o].dropna().unique().tolist()
-                office = st.selectbox("営業所名", offices, index=0 if offices else None, key="office")
-        else:
-            col1, col2, col3 = st.columns([1.0, 1.0, 1.0])
-            with col1:
-                customer = st.text_input("社名（得意先名）", value=st.session_state.get("customer",""), key="customer")
-            with col2:
-                branch = st.text_input("支店名", value=st.session_state.get("branch",""), key="branch")
-            with col3:
-                office = st.text_input("営業所名", value=st.session_state.get("office",""), key="office")
+        col1, col2, col3 = st.columns([1.0, 1.0, 1.0])
+        with col1:
+            # 社名：マスタがあればプルダウン、無ければ手入力
+            if not df_cus.empty:
+                c_cus = pick_col(df_cus, ["社名"]) or df_cus.columns[0]
+                cus_list = df_cus[c_cus].dropna().unique().tolist()
+                customer = _selectbox_or_text("社名（得意先名）", cus_list, key="customer")
+            else:
+                customer = _selectbox_or_text("社名（得意先名）", [], key="customer")
+        with col2:
+            # 支店：支店マスタがあれば（社名フィルタ後を）プルダウン
+            if not df_branch.empty:
+                c_b_cus = pick_col(df_branch, ["社名"]) or df_branch.columns[0]
+                c_b = pick_col(df_branch, ["支店名","支店"]) or df_branch.columns[1]
+                branches = df_branch[df_branch[c_b_cus]==customer][c_b].dropna().unique().tolist() if customer else []
+                branch = _selectbox_or_text("支店名", branches, key="branch")
+            else:
+                branch = _selectbox_or_text("支店名", [], key="branch")
+        with col3:
+            # 営業所：営業所マスタがあれば（社名・支店でフィルタ後を）プルダウン
+            if not df_office.empty:
+                c_o_cus = pick_col(df_office, ["社名"]) or df_office.columns[0]
+                c_o_b = pick_col(df_office, ["支店名","支店"]) or df_office.columns[1]
+                c_o = pick_col(df_office, ["営業所名","営業所"]) or df_office.columns[2]
+                offices = df_office[(df_office[c_o_cus]==customer) & (df_office[c_o_b]==branch)][c_o].dropna().unique().tolist() if (customer and branch) else []
+                office = _selectbox_or_text("営業所名", offices, key="office")
+            else:
+                office = _selectbox_or_text("営業所名", [], key="office")
 
         col4, col5, col6 = st.columns([0.8, 0.6, 1.4])
         with col4:
@@ -505,6 +546,7 @@ if HAS_STREAMLIT:
     def add_total(v):
         globals()["overall_total"] = globals().get("overall_total", 0) + int(v or 0)
 
+    # --- 間口（S・MAC） ---
     def render_opening(idx: int):
         pref = f"o{idx}_"
 
@@ -587,19 +629,41 @@ if HAS_STREAMLIT:
             st.markdown(f"#### 間口 {i}")
             render_opening(i)
 
+    # --- 部材（任意品）入力 ---
+    st.markdown("---")
+    st.markdown("### 部材（任意品）入力")
+    import numpy as np
+    cols = ["品名","数量","単位","単価","備考"]
+    if "materials_df" not in st.session_state:
+        st.session_state.materials_df = pd.DataFrame([{c:("" if c!="数量" else 1) for c in cols}])
+    df_mats = st.data_editor(
+        st.session_state.materials_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        key="materials_editor",
+    )
+    st.session_state.materials_df = df_mats
+    mats_items, mats_total = build_material_items(df_mats.to_dict(orient="records"))
+
+    if mats_items:
+        overall_items.extend(mats_items)
+        add_total(mats_total)
+
+    # サマリ
     st.markdown("---")
     st.markdown("### 見積サマリ")
-    if 'overall_items' in globals() and globals().get('overall_items'):
-        cols = ["品名","数量","単位","単価","小計","種別","備考"]
+    if overall_items:
+        cols_o = ["品名","数量","単位","単価","小計","種別","備考"]
         rows = []
         prev_mark = None; started = False
         for it in overall_items:
             mark = extract_mark(it.get("備考","")); head = is_opening_head(it)
             if started and ((mark and mark!=prev_mark) or head):
-                rows.append({c: "" for c in cols})
+                rows.append({c: "" for c in cols_o})
             prev_mark = mark if mark else prev_mark; started=True
-            rows.append({c: it.get(c, "") for c in cols})
-        df_sum = pd.DataFrame(rows, columns=cols)
+            rows.append({c: it.get(c, "") for c in cols_o})
+        df_sum = pd.DataFrame(rows, columns=cols_o)
         def _n(v):
             if v in (None, "", "-"): return ""
             try: return f"{int(v):,}"
@@ -613,6 +677,7 @@ if HAS_STREAMLIT:
     st.markdown("### 見積金額")
     st.metric("税抜合計", f"¥{globals().get('overall_total', 0):,}")
 
+    # Excel
     st.markdown("---")
     st.markdown("### Excel出力")
     if st.button("Excel保存", key="excel_save_btn_v1"):
@@ -697,6 +762,14 @@ else:
         r_thick= smac_estimate("標準0.4t",  "片引き", W=1800, H=2000, cnt=1, picked_ops_rows=[])
         assert r_thin["ok"] and r_thick["ok"]
         assert r_thick["breakdown"]["四方折り返し(1式)"] >= r_thin["breakdown"]["四方折り返し(1式)"]
+
+        # Test 7: 部材アイテム生成
+        mats, tot = build_material_items([
+            {"品名":"ブラケット", "数量":2, "単位":"個", "単価":350, "備考":"--"},
+            {"品名":"ビス", "数量":10, "単位":"本", "単価":15},
+            {"品名":"空行", "数量":0, "単価":100},  # 無視されるべき
+        ])
+        assert len(mats) == 2 and tot == 2*350 + 10*15
 
         print("All tests passed.")
 
