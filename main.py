@@ -475,10 +475,34 @@ def render_opening(idx: int):
         if large=="S・MACカーテン":
             sm = smac_estimate(middle or "", st.session_state.get(pref+"open") or "片引き",
                                W, H, CNT, df_gen, df_op, picked_ops)
-            if sm["ok"]:
-                note = f"W{W}×H{H}mm"
-                if sm["note_ops"]: note += "／OP：" + "・".join(sm["note_ops"])
-                overall_items.append({
+                   # サマリに追加（辞書だけで完結）
+        note = f"W{W}×H{H}mm"
+        if sm["note_ops"]:
+            note += "／OP：" + "・".join(sm["note_ops"])
+
+        overall_items.append({
+            "品名": "S・MACカーテン"
+                   + (f" {middle}" if middle else "")
+                   + (f" {st.session_state.get(pref+'open')}" if st.session_state.get(pref+'open') else ""),
+            "数量": CNT,
+            "単位": "式",
+            "単価": sm["sell_one"],
+            "小計": sm["sell_total"],
+            "種別": "S・MAC",
+            "備考": (f"符号:{mark}／" if mark else "") + note
+        })
+        overall_total_update(sm["sell_total"])
+
+        # ← append の外で原価構成を表示
+        bd = sm.get("breakdown")
+        if bd:
+            with st.expander("原価構成（1間口あたり）", expanded=False):
+                dfb = pd.DataFrame(
+                    {"項目": list(bd.keys()), "金額": [int(bd[k]) for k in bd]}
+                )
+                st.dataframe(dfb, use_container_width=True, hide_index=True)
+                st.caption("※ OP金額はカーテン金額に内包・サマリには名称のみ表示")
+
 # （S・MACサマリ追加の直後）
 if sm.get("breakdown"):
     with st.expander("原価構成（1間口あたり）", expanded=False):
