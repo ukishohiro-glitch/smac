@@ -37,17 +37,18 @@ from openpyxl.utils import get_column_letter
 NUM_RE = re.compile(r"[-+]?\d[\d,]*\.?\d*")
 
 def normalize_string(s):
+    """どんな型でも**必ず str**にして正規化。NaN/None→空文字。"""
     if s is None:
         return ""
-    if isinstance(s, str):
-        s = unicodedata.normalize("NFKC", s).replace("\u3000", " ")
-        s = re.sub(r"\s+", " ", s.strip())
+    s = str(s)
+    s = unicodedata.normalize("NFKC", s).replace("\u3000", " ")
+    s = re.sub(r"\s+", " ", s.strip())
     return s
 
 def parse_float(x):
     if x is None:
         return None
-    if isinstance(x, (int, float)):
+    if isinstance(x, (int, float)) and not (isinstance(x, float) and pd.isna(x)):
         return float(x)
     m = NUM_RE.search(str(x))
     return float(m.group()) if m else None
@@ -62,16 +63,21 @@ def ceil100(x):
     return int(math.ceil(float(x) / 100.0) * 100)
 
 def pick_col(df: pd.DataFrame, candidates):
+    """列名探索。列名が数値/NaNでも落ちないように **常に str.lower()** で比較。"""
     if df is None or df.empty:
         return None
     cols = [normalize_string(c) for c in df.columns]
     df.columns = cols
+    # 完全一致
     for c in candidates:
-        if c in cols:
-            return c
+        sc = normalize_string(c)
+        if sc in cols:
+            return sc
+    # 部分一致（大小無視）
     for col in cols:
+        scol = normalize_string(col).lower()
         for c in candidates:
-            if str(c).lower() in col.lower():
+            if normalize_string(c).lower() in scol:
                 return col
     return None
 
@@ -454,9 +460,9 @@ if HAS_STREAMLIT:
     st.markdown(
         """
         <style>
-        html, body, [data-testid="stAppViewContainer"] * { font-size: 9pt !important; }
+        html, body, [data-testid=\"stAppViewContainer\"] * { font-size: 9pt !important; }
         h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 { font-size: 11pt !important; }
-        [data-testid="stMetricValue"], [data-testid="stMetricLabel"] { font-size: 9pt !important; }
+        [data-testid=\"stMetricValue\"], [data-testid=\"stMetricLabel\"] { font-size: 9pt !important; }
         thead, tbody, .stDataFrame, .stTable { font-size: 9pt !important; }
         .stButton>button, .stDownloadButton>button, .stTextInput input, .stNumberInput input,
         .stSelectbox div, .stRadio div { font-size: 9pt !important; }
@@ -857,6 +863,13 @@ else:
             {"品名":"空行", "数量":0, "単価":100},  # 無視されるべき
         ])
         assert len(mats) == 2 and tot == 2*350 + 10*15
+
+        # Test 8: 非文字列ヘッダでも落ちない
+        df_tmp = pd.DataFrame([[1,2]], columns=[123, "単価"])  # 数値ヘッダ
+        assert pick_col(df_tmp, ["品名","名称","品目"]) is None
+        assert pick_col(df_tmp, ["単価"]) == "単価"
+        df_tmp2 = pd.DataFrame(columns=[float('nan'), "価格"])  # NaN ヘッダ
+        assert pick_col(df_tmp2, ["価格"]) == "価格"
 
         print("All tests passed.")
 
