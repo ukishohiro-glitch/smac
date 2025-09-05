@@ -4,7 +4,6 @@ TEMPLATE_BOOK = APP_DIR / "お見積書（明細）.xlsx"
 MASTER_BOOK   = APP_DIR / "master.xlsx"
 # -*- coding: utf-8 -*-
 # main.py — ①大分類ラジオ ②片引き/引分けラジオ ③部材品名ラジオ ④定型文チェック ⑤Excel出力(お見積書(明細)) 対応版
-from __future__ import annotations
 import os, os.path as osp, secrets, math, re, unicodedata
 from datetime import datetime, date
 import pandas as pd
@@ -104,19 +103,17 @@ def extract_thickness(text: str) -> float | None:
 
 def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int,
                   df_gen: pd.DataFrame, df_op: pd.DataFrame, picked_ops: list[dict]):
-    """
-    戻り値:
-      {
-        ok, msg, sell_one, sell_total, note_ops,
-        breakdown: {
-          "原反材料(1式)", "カット工賃(1式)", "ヘム加工(合計)", "OP加算(合計)",
-          "原価(1式)", "原価(数量分)", "販売単価(1式)", "販売金額(数量分)", "粗利率"
-        }
-      }
-    """
+    """戻り値: dict(ok, sell_one, sell_total, note_ops, breakdown)
+       breakdown は 1間口あたりの内訳＋補足情報を含みます。"""
+    # --- 調整しやすい単価（必要ならここを変えてください） ---
+    HEM_UNIT_THIN = 450     # 四方折り返し（0.3t以下）
+    HEM_UNIT_THICK = 550    # 四方折り返し（0.3t超）
+    SEAM_UNIT_PER_M = 300   # 幅繋ぎ：1本あたり1m単価（縦方向の継ぎ）
+
     res = {"ok": False, "msg": "", "sell_one": 0, "sell_total": 0, "note_ops": [], "breakdown": {}}
     if not middle_name or W<=0 or H<=0 or cnt<=0 or df_gen.empty:
-        res["msg"] = "S・MAC：中分類/寸法/数量/原反価格を確認してください。"; return res
+        res["msg"] = "S・MAC：中分類/寸法/数量/原反価格を確認してください。"
+        return res
 
     name_col = pick_col(df_gen, ["製品名","品名","名称"]) or df_gen.columns[0]
     w_col    = pick_col(df_gen, ["原反幅(mm)","原反幅","幅","巾"]) or df_gen.columns[1]
@@ -124,69 +121,83 @@ def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int,
     t_col    = pick_col(df_gen, ["厚み","厚さ","t"])
 
     hit = df_gen[df_gen[name_col]==middle_name]
-    if hit.empty: hit = df_gen[df_gen[name_col].astype(str).str.contains(re.escape(middle_name), na=False)]
-    if hit.empty: 
-        res["msg"] = f"S・MAC：原反価格に『{middle_name}』が見つかりません。"; return res
+    if hit.empty:
+        hit = df_gen[df_gen[name_col].astype(str).str.contains(re.escape(middle_name), na=False)]
+    if hit.empty:
+        res["msg"] = f"S・MAC：原反価格に『{middle_name}』が見つかりません。"
+        return res
 
-    gen_width = parse_float(hit.iloc[0][w_col]); gen_price = parse_float(hit.iloc[0][u_col])
+    gen_width = parse_float(hit.iloc[0][w_col])
+    gen_price = parse_float(hit.iloc[0][u_col])
     thick = extract_thickness(hit.iloc[0][t_col]) if t_col else extract_thickness(hit.iloc[0][name_col])
     if not gen_width or not gen_price:
-        res["msg"] = "S・MAC：原反幅または単価が不正です。"; return res
+        res["msg"] = "S・MAC：原反幅または単価が不正です。"
+        return res
 
-    # 寸法（片引きはWそのまま、引分けは半分×2パネル）
+    # 寸法補正（片引き=1枚、引分け=2枚）
     if open_method == "片引き":
-        cur_w = W*1.05; panels = 1
+        cur_w = W * 1.05; panels = 1
     else:
-        cur_w = (W/2)*1.05; panels = 2
+        cur_w = (W/2) * 1.05; panels = 2
     cur_h = H + 50
-    length_per_panel_m = (cur_h*1.2)/1000.0
-    joints = math.ceil(cur_w/gen_width)
 
-    # 原価内訳（1式／合計）
-    raw_one = gen_price * length_per_panel_m * joints * panels      # 原反材料費（1式）
-    cutting_one = (2000 if joints<=3 else 3000) * panels            # カット工賃（1式）
+    # 原反使用量（1間口）
+    length_per_panel_m = (cur_h * 1.2) / 1000.0         # ふところ含む仮係数
+    joints = math.ceil(cur_w / gen_width)               # 1パネル内の原反継ぎ本数
+    raw_len_m = length_per_panel_m * joints * panels    # ★原反使用量[m]（1間口あたり）
+    raw_one = gen_price * raw_len_m                      # 原反材料（1式）
 
-    # OP（方向：W/横/X は幅基準、その他は高さ基準）— 合計で管理
-    note_ops = []; op_total = 0
-    if not df_op.empty:
-        for op in picked_ops or []:
-            name = normalize_string(op.get("OP名称","")); unit = int(parse_float(op.get("金額")) or 0)
-            dire = normalize_string(op.get("方向","")).upper()
-            if not name or unit<=0: continue
-            base_mm = cur_w if dire in ["W","横","X"] else cur_h
-            units_1000 = math.ceil(base_mm/1000.0)
-            sub = units_1000 * unit * panels * cnt
-            op_total += sub; note_ops.append(name)
+    # 裁断賃（旧カット工賃）
+    cutting_one = (2000 if joints <= 3 else 3000) * panels
 
-    # ヘム加工（厚みに応じた単価）
-    hem_unit = 450 if (thick is not None and thick<=0.3) else 550
-    hem_perimeter_m = (cur_w+cur_w+cur_h+cur_h)/1000.0
-    hem_total = math.ceil(hem_perimeter_m)*hem_unit*panels*cnt
+    # 幅繋ぎ：縦継ぎ（継ぎ本数×高さ×単価）
+    seams_total = max(0, joints - 1) * panels
+    seam_one = math.ceil(cur_h/1000.0) * SEAM_UNIT_PER_M * seams_total
 
-    # 原価集計
-    genka_one   = raw_one + cutting_one + (hem_total/cnt if cnt else 0) + (op_total/cnt if cnt else 0)
-    genka_total = int(round(raw_one*cnt + cutting_one*cnt + hem_total + op_total))
+    # 四方折り返し：周長[m]×単価
+    hem_unit = HEM_UNIT_THIN if (thick is not None and thick <= 0.3) else HEM_UNIT_THICK
+    hem_perimeter_m = (cur_w + cur_w + cur_h + cur_h) / 1000.0
+    fourfold_one = math.ceil(hem_perimeter_m) * hem_unit * panels
 
-    # 販売（粗利40%想定 → 原価/0.6 を100円単位切上げ）
-    sell_one   = ceil100(genka_one/0.6)
-    sell_total = ceil100(genka_total/0.6)
+    # OP（方向：W/横/X=幅基準、それ以外=高さ基準）— 1式に均等化
+    note_ops, op_total = [], 0
+    for op in (picked_ops or []):
+        name = normalize_string(op.get("OP名称","")); unit = int(parse_float(op.get("金額")) or 0)
+        dire = normalize_string(op.get("方向","")).upper()
+        if not name or unit<=0: continue
+        base_mm = cur_w if dire in ["W","横","X"] else cur_h
+        units_1000 = math.ceil(base_mm/1000.0)
+        sub = units_1000 * unit * panels * cnt
+        op_total += sub; note_ops.append(name)
+    op_one = op_total / cnt if cnt else 0
 
-    # 返却
+    # 原価→売価
+    genka_one   = raw_one + cutting_one + seam_one + fourfold_one + op_one
+    genka_total = raw_one*cnt + cutting_one*cnt + seam_one*cnt + fourfold_one*cnt + op_total
+    sell_one    = ceil100(genka_one / 0.6)              # 粗利40%想定
+    sell_total  = ceil100(genka_total / 0.6)
+
     res.update({
         "ok": True,
         "sell_one": int(sell_one),
         "sell_total": int(sell_total),
         "note_ops": note_ops,
         "breakdown": {
-            "原反材料(1式)":      int(round(raw_one)),
-            "カット工賃(1式)":    int(round(cutting_one)),
-            "ヘム加工(合計)":     int(round(hem_total)),
-            "OP加算(合計)":       int(round(op_total)),
-            "原価(1式)":          int(round(genka_one)),
-            "原価(数量分)":       int(round(genka_total)),
-            "販売単価(1式)":      int(sell_one),
-            "販売金額(数量分)":    int(sell_total),
-            "粗利率":             max(0.0, 1.0 - (genka_total / sell_total)) if sell_total else 0.0,
+            # 補足情報
+            "原反使用量(m)":       round(raw_len_m, 2),
+            "原反幅(mm)":          int(round(gen_width)),
+            "原反単価(円/m)":       int(round(gen_price)),
+            # 金額内訳（1式＝1間口）
+            "原反材料(1式)":        int(round(raw_one)),
+            "裁断賃(1式)":          int(round(cutting_one)),
+            "幅繋ぎ(1式)":          int(round(seam_one)),
+            "四方折り返し(1式)":    int(round(fourfold_one)),
+            "OP加算(1式)":          int(round(op_one)),
+            "原価(1式)":            int(round(genka_one)),
+            # 参考
+            "販売単価(1式)":        int(sell_one),
+            "販売金額(数量分)":      int(sell_total),
+            "粗利率":               (max(0.0, 1.0 - (genka_total / sell_total)) if sell_total else 0.0),
         }
     })
     return res
@@ -518,16 +529,39 @@ def render_opening(idx: int):
                 })
                 overall_total_update(sm["sell_total"])
 
-                # 原価構成（1間口あたり）を表示
-                bd = sm.get("breakdown")
+                                # 原価構成（1間口あたり）を表示
+                bd = sm.get("breakdown", {})
                 if bd:
                     with st.expander("原価構成（1間口あたり）", expanded=False):
-                        dfb = pd.DataFrame({"項目": list(bd.keys()),
-                                            "金額": [int(bd[k]) for k in bd]})
-                        st.dataframe(dfb, use_container_width=True, hide_index=True)
-                        st.caption("※ OP金額はカーテン金額に内包・サマリには名称のみ表示")
+                        order = [
+                            "原反使用量(m)", "原反幅(mm)", "原反単価(円/m)",
+                            "原反材料(1式)", "裁断賃(1式)", "幅繋ぎ(1式)", "四方折り返し(1式)", "OP加算(1式)",
+                            "原価(1式)", "販売単価(1式)", "販売金額(数量分)", "粗利率"
+                        ]
+                        rows = []
+                        for k in order:
+                            if k not in bd:
+                                continue
+                            v = bd[k]
+                            if k == "原反使用量(m)":
+                                rows.append([k, f"{float(v):.2f} m"])
+                            elif k == "原反幅(mm)":
+                                rows.append([k, f"{int(v)} mm"])
+                            elif k == "原反単価(円/m)":
+                                rows.append([k, f"¥{int(v):,}/m"])
+                            elif k == "粗利率":
+                                rows.append([k, f"{float(v)*100:.1f}%"])
+                            else:
+                                rows.append([k, f"¥{int(v):,}"])
+
+                        st.dataframe(
+                            pd.DataFrame(rows, columns=["項目", "金額"]),
+                            use_container_width=True, hide_index=True
+                        )
             else:
+                # ここは sm["ok"] が False のときに出す警告
                 st.warning(sm.get("msg") or "S・MACの計算に失敗しました。")
+
 
         elif large=="エア・セーブ" and air_type:
             if air_type=="MA" and air_item and perf:
