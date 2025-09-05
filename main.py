@@ -3,9 +3,10 @@
 main.py（フル実装・外部定型文/ダミー一切なし）
 - 単価参照は **master（原反価格シート）限定**。CSV の参照・切替 UI は排除。
 - シート名は『原反価格』『OP』を最優先で解決（記号差・全半角差に耐性）。
-- 得意先は『社名/支店/営業所』を**個別に**プルダウン化（存在するマスタだけ利用）。無い要素は自動で手入力にフォールバック。
+- 得意先は『社名/支店/営業所』を**個別に**プルダウン化（存在するマスタだけ利用）。無い要素は自動で手入力にフォールバック。※『得意先一覧』単一シートにも対応（同シートから支店/営業所を自動派生）。
 - UI フォントは 見出し=11pt／その他=9pt に統一。アプリ題名は『お見積書作成システム』。
 - S・MAC見積に加えて、**部材（任意品）入力**セクションを追加（行追加、数量×単価で小計、サマリ/Excelに反映）。
+- **部材は master の各シートを自動スキャン**し、『品名』『単価』（任意で『単位』『備考』）を持つシートを**部材カタログ**として参照可能に。
 - CLI テストは同梱（本運用仕様の安全網）。
 
 起動方法：
@@ -127,7 +128,8 @@ if HAS_STREAMLIT:
         sheet_op_candidates     = ["OP", "SMAC-OP", "SMAC_OP", "SMACOP", "OPマスタ"]
         sheet_cat_candidates    = ["カーテン", "カーテンマスタ"]  # 任意
         sheet_perf_candidates   = ["カーテン性能", "性能", "性能マスタ"]  # 任意
-        sheet_cus_candidates    = ["得意先", "顧客", "取引先"]  # 任意
+        # ★ 得意先は『得意先一覧』にも対応
+        sheet_cus_candidates    = ["得意先一覧", "得意先", "顧客", "取引先"]  # 任意
         sheet_branch_candidates = ["支店", "部署", "部支店"]  # 任意
         sheet_office_candidates = ["営業所", "事業所", "オフィス"]  # 任意
 
@@ -170,6 +172,7 @@ if HAS_STREAMLIT:
         if not df_perf.empty:
             _ensure(df_perf, [["中分類"],["性能"]], sh_perf)
         if not df_cus.empty:
+            # 得意先一覧の最小要件は社名（支店/営業所があれば後で派生に利用）
             _ensure(df_cus, [["社名"]], sh_cus)
         if not df_branch.empty:
             _ensure(df_branch, [["社名"],["支店名","支店"]], sh_branch)
@@ -181,6 +184,44 @@ if HAS_STREAMLIT:
         price_col = pick_col(df_gen, ["単価","単価(円/m)","原反単価","価格","金額"])  # ここは必ず見つかる前提
         df_genprice_master = df_gen.rename(columns={name_col:"製品名", price_col:"単価"})[["製品名","単価"]]
 
+        # ★『得意先一覧』のみの構成に対応：支店/営業所シートが無くても派生する
+        if (df_branch.empty or df_office.empty) and not df_cus.empty:
+            cus_c = pick_col(df_cus, ["社名"]) or df_cus.columns[0]
+            br_c  = pick_col(df_cus, ["支店名","支店"])  # 任意
+            of_c  = pick_col(df_cus, ["営業所名","営業所"])  # 任意
+            if df_branch.empty and br_c:
+                df_branch = df_cus[[cus_c, br_c]].dropna().drop_duplicates()
+                df_branch.columns = ["社名","支店名"]
+            if df_office.empty and br_c and of_c:
+                df_office = df_cus[[cus_c, br_c, of_c]].dropna().drop_duplicates()
+                df_office.columns = ["社名","支店名","営業所名"]
+
+        # ★ 部材カタログ：既知以外の全シートをスキャンし、『品名』『単価』などを持つ場合に採用
+        known = set([n for n in [sh_gen, sh_op, sh_cat, sh_perf, sh_cus, sh_branch, sh_office] if n])
+        materials_catalogs: dict[str, pd.DataFrame] = {}
+        for sh in xls.sheet_names:
+            if sh in known:
+                continue
+            try:
+                df_tmp = pd.read_excel(REQ_MASTER, sheet_name=sh)
+            except Exception:
+                continue
+            if df_tmp is None or df_tmp.empty:
+                continue
+            nm = pick_col(df_tmp, ["品名","名称","品目"]) 
+            pr = pick_col(df_tmp, ["単価","価格","金額"])
+            if nm and pr:
+                un = pick_col(df_tmp, ["単位"]) or None
+                no = pick_col(df_tmp, ["備考","注記"]) or None
+                cols_map = {nm:"品名", pr:"単価"}
+                if un: cols_map[un] = "単位"
+                if no: cols_map[no] = "備考"
+                df_norm = df_tmp.rename(columns=cols_map)[[c for c in ["品名","単価","単位","備考"] if c in cols_map.values()]]
+                # 型整形（単価は数値化）
+                if "単価" in df_norm.columns:
+                    df_norm["単価"] = df_norm["単価"].map(lambda v: parse_float(v) or None)
+                materials_catalogs[sh] = df_norm.dropna(subset=["品名"]).reset_index(drop=True)
+        
         return {
             "df_gen": df_gen,
             "df_op": df_op,
@@ -190,6 +231,7 @@ if HAS_STREAMLIT:
             "df_branch": df_branch,
             "df_office": df_office,
             "df_genprice_master": df_genprice_master,
+            "materials_catalogs": materials_catalogs,
         }
 
 # =========================
@@ -441,6 +483,7 @@ if HAS_STREAMLIT:
     df_branch   = M["df_branch"].copy()
     df_office   = M["df_office"].copy()
     df_genprice = M["df_genprice_master"].copy()  # master 限定
+    materials_catalogs: dict[str, pd.DataFrame] = M.get("materials_catalogs", {})
 
     # 原反の単価結合（製品名で左結合）
     name_g = pick_col(df_gen, ["製品名","品名","名称"]) or df_gen.columns[0]
@@ -503,24 +546,33 @@ if HAS_STREAMLIT:
             else:
                 customer = _selectbox_or_text("社名（得意先名）", [], key="customer")
         with col2:
-            # 支店：支店マスタがあれば（社名フィルタ後を）プルダウン
+            # 支店：支店マスタがあれば（社名フィルタ後を）プルダウン／無い場合は『得意先一覧』内の列から派生
+            branches = []
             if not df_branch.empty:
                 c_b_cus = pick_col(df_branch, ["社名"]) or df_branch.columns[0]
                 c_b = pick_col(df_branch, ["支店名","支店"]) or df_branch.columns[1]
                 branches = df_branch[df_branch[c_b_cus]==customer][c_b].dropna().unique().tolist() if customer else []
-                branch = _selectbox_or_text("支店名", branches, key="branch")
-            else:
-                branch = _selectbox_or_text("支店名", [], key="branch")
+            elif not df_cus.empty:
+                c_b = pick_col(df_cus, ["支店名","支店"])  # 任意
+                c_c = pick_col(df_cus, ["社名"]) or df_cus.columns[0]
+                if c_b:
+                    branches = df_cus[df_cus[c_c]==customer][c_b].dropna().unique().tolist() if customer else []
+            branch = _selectbox_or_text("支店名", branches, key="branch")
         with col3:
-            # 営業所：営業所マスタがあれば（社名・支店でフィルタ後を）プルダウン
+            # 営業所：営業所マスタがあれば（社名・支店でフィルタ後を）プルダウン／無い場合は『得意先一覧』内から派生
+            offices = []
             if not df_office.empty:
                 c_o_cus = pick_col(df_office, ["社名"]) or df_office.columns[0]
                 c_o_b = pick_col(df_office, ["支店名","支店"]) or df_office.columns[1]
                 c_o = pick_col(df_office, ["営業所名","営業所"]) or df_office.columns[2]
                 offices = df_office[(df_office[c_o_cus]==customer) & (df_office[c_o_b]==branch)][c_o].dropna().unique().tolist() if (customer and branch) else []
-                office = _selectbox_or_text("営業所名", offices, key="office")
-            else:
-                office = _selectbox_or_text("営業所名", [], key="office")
+            elif not df_cus.empty:
+                c_o = pick_col(df_cus, ["営業所名","営業所"])  # 任意
+                c_b = pick_col(df_cus, ["支店名","支店"])  # 任意
+                c_c = pick_col(df_cus, ["社名"]) or df_cus.columns[0]
+                if c_o and c_b:
+                    offices = df_cus[(df_cus[c_c]==customer) & (df_cus[c_b]==branch)][c_o].dropna().unique().tolist() if (customer and branch) else []
+            office = _selectbox_or_text("営業所名", offices, key="office")
 
         col4, col5, col6 = st.columns([0.8, 0.6, 1.4])
         with col4:
@@ -619,7 +671,7 @@ if HAS_STREAMLIT:
                 st.warning(r.get("msg") or "S・MACの計算に失敗しました。")
 
     st.markdown("---")
-    col_a, col_b = st.columns([0.85,0.15])
+    col_a, col_b = st.columns([0.7,0.3])
     with col_b:
         if st.button("＋ 間口を追加", key="add_opening_btn"):
             st.session_state.openings.append(len(st.session_state.openings)+1)
@@ -632,7 +684,42 @@ if HAS_STREAMLIT:
     # --- 部材（任意品）入力 ---
     st.markdown("---")
     st.markdown("### 部材（任意品）入力")
-    import numpy as np
+
+    # 1) 部材カタログから追加（master の各シート参照）
+    if materials_catalogs:
+        sh_names = sorted(list(materials_catalogs.keys()))
+        colm1, colm2, colm3, colm4, colm5 = st.columns([1.2, 1.2, 0.7, 0.8, 0.6])
+        with colm1:
+            sel_sheet = st.selectbox("参照シート", sh_names, key="mat_src_sheet")
+        df_src = materials_catalogs.get(sel_sheet, pd.DataFrame())
+        with colm2:
+            item_names = df_src["品名"].dropna().unique().tolist() if not df_src.empty and "品名" in df_src.columns else []
+            sel_item = st.selectbox("品名（カタログ）", item_names, key="mat_src_item") if item_names else None
+        # 既定値の抽出
+        base_unit = ""
+        base_price = None
+        base_note = ""
+        if sel_item and not df_src.empty:
+            row = df_src[df_src["品名"]==sel_item].iloc[0]
+            base_unit = str(row.get("単位", "") or "")
+            base_price = int(parse_float(row.get("単価")) or 0)
+            base_note = str(row.get("備考", "") or "")
+        with colm3:
+            qty = st.number_input("数量", min_value=1, value=1, step=1, key="mat_src_qty")
+        with colm4:
+            unit = st.text_input("単位", value=base_unit, key="mat_src_unit")
+        with colm5:
+            price = st.number_input("単価", min_value=0, value=(base_price or 0), step=10, key="mat_src_price")
+        note = st.text_input("備考", value=base_note, key="mat_src_note")
+        if st.button("この部材を追加", key="mat_add_btn") and sel_item:
+            new_row = {"品名": sel_item, "数量": qty, "単位": unit, "単価": int(price), "備考": note}
+            if "materials_df" not in st.session_state or st.session_state.materials_df is None:
+                st.session_state.materials_df = pd.DataFrame([new_row])
+            else:
+                st.session_state.materials_df = pd.concat([st.session_state.materials_df, pd.DataFrame([new_row])], ignore_index=True)
+            st.success("部材を追加しました。下の表で編集・削除できます。")
+
+    # 2) 直接編集（行追加・削除可）
     cols = ["品名","数量","単位","単価","備考"]
     if "materials_df" not in st.session_state:
         st.session_state.materials_df = pd.DataFrame([{c:("" if c!="数量" else 1) for c in cols}])
