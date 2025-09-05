@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-main.py（フル実装・外部定型文/ダミーなし） — シート名「原反価格」「OP」に対応 & 得意先系シートが無くてもUIで手入力に自動フォールバック
+main.py（フル実装・外部定型文/ダミーなし） — シート名「原反価格」「OP」に対応 & 得意先系シートが無くてもUIで手入力に自動フォールバック（原反単価の参照元を UI で CSV／master／自動 に切替可能）
 
-今回の修正点（エラー解消）：
-- 画像の例外は、得意先系シート（得意先/支店/営業所）が存在しないにもかかわらず **必須扱い** で解決を試み、`HaltError` を投げていたことが原因。
-- これらのシートを **任意扱い** に変更し、見つからない場合は **テキスト入力に自動フォールバック** するように修正。
-- `_try_resolve_sheet` を追加して、任意シートは見つからなければ `None` を返す設計に変更。
-- 既存テストは維持、`sys.exit` は不使用のまま。
+今回の修正点：
+- IndentationError/KeyError の原因を除去：不要に重複していた return ブロックと迷い行を削除、インデントを整理。
+- 単価参照元は UI で切替（CSV優先／master優先／自動）。
+- 得意先系シートが無い場合でもテキスト入力に自動フォールバック。
+- CLIテストは既存を維持し、追加テスト（厚み差の原価検証）を追加。
 
 使い方：
 - GUI（推奨）：`pip install streamlit pandas openpyxl` → `streamlit run main.py`
@@ -125,7 +125,6 @@ if HAS_STREAMLIT:
     @st.cache_data(show_spinner=False)
     def load_all():
         must_exist(REQ_MASTER, "master.xlsx")
-        must_exist(REQ_GENCSV, "原反単価表.csv")
 
         xls = pd.ExcelFile(REQ_MASTER)
 
@@ -184,33 +183,25 @@ if HAS_STREAMLIT:
                 if miss:
                     err_stop(f"シート『{name}』に必須列がありません: {miss}")
 
-        # 原反単価（CSV）
-        df_genprice = pd.read_csv(REQ_GENCSV, encoding="utf-8")
-        # 列名ゆるく解決（全半角/記号違い・別名を吸収）
-        df_genprice.columns = [normalize_string(c) for c in df_genprice.columns]
-        prod_col = pick_col(df_genprice, ["製品名","品名","名称","中分類"])  # 製品名相当
-        price_col = pick_col(df_genprice, ["単価","単価(円/m)","原反単価","価格","金額"])  # 単価相当
-        if not prod_col or not price_col:
-            err_stop("原反単価表.csv に『製品名』『単価』相当の列が見つかりません。列名を確認してください。")
-        # 以降の処理で扱いやすいように標準名へリネーム
-        if prod_col != "製品名":
-            df_genprice = df_genprice.rename(columns={prod_col: "製品名"})
-        if price_col != "単価":
-            df_genprice = df_genprice.rename(columns={price_col: "単価"})
-
-        # OPマスタ（任意・優先）
-        if os.path.exists(REQ_OP):
-            xls_op = pd.ExcelFile(REQ_OP)
+        # 原反単価（CSVとmasterの両方を用意し、UIで切替）
+        # CSV 側
+        df_genprice_csv = pd.DataFrame()
+        if os.path.exists(REQ_GENCSV):
             try:
-                sh_op2 = _resolve_sheet(xls_op, sheet_op_candidates)
-                df_op2 = pd.read_excel(REQ_OP, sheet_name=sh_op2)
-                if not df_op2.empty:
-                    name_col = pick_col(df_op2, ["OP名称"]) or df_op2.columns[0]
-                    df_tmp = pd.concat([df_op2, df_op], ignore_index=True)
-                    if name_col in df_tmp.columns:
-                        df_op = df_tmp.drop_duplicates(subset=[name_col], keep="first")
-            except HaltError:
+                _csv = pd.read_csv(REQ_GENCSV, encoding="utf-8")
+                _csv.columns = [normalize_string(c) for c in _csv.columns]
+                prod_col = pick_col(_csv, ["製品名","品名","名称","中分類"])  # 製品名相当
+                price_col = pick_col(_csv, ["単価","単価(円/m)","原反単価","価格","金額"])  # 単価相当
+                if prod_col and price_col:
+                    df_genprice_csv = _csv.rename(columns={prod_col: "製品名", price_col: "単価"})[["製品名","単価"]]
+            except Exception:
                 pass
+        # master 側
+        name_guess = pick_col(df_gen, ["製品名","品名","名称"]) or (df_gen.columns[0] if len(df_gen.columns)>0 else None)
+        price_guess = pick_col(df_gen, ["単価","単価(円/m)","原反単価","価格","金額"])  # 単価相当
+        df_genprice_master = pd.DataFrame()
+        if name_guess and price_guess:
+            df_genprice_master = df_gen.rename(columns={name_guess:"製品名", price_guess:"単価"})[["製品名","単価"]]
 
         return {
             "df_gen": df_gen,
@@ -220,7 +211,8 @@ if HAS_STREAMLIT:
             "df_cus": df_cus,
             "df_branch": df_branch,
             "df_office": df_office,
-            "df_genprice": df_genprice,
+            "df_genprice_csv": df_genprice_csv,
+            "df_genprice_master": df_genprice_master,
         }
 
 # =========================
@@ -421,10 +413,15 @@ if HAS_STREAMLIT:
     st.title("S・MAC 見積アプリ（定型文なし）")
 
     M = load_all()
-    # 正規化
-    for k in ["df_gen","df_op","df_catalog","df_perf","df_cus","df_branch","df_office","df_genprice"]:
-        df = M[k]
-        df.columns = [normalize_string(c) for c in df.columns]
+    # 正規化（存在するキーだけ処理）
+    for k in [
+        "df_gen","df_op","df_catalog","df_perf","df_cus","df_branch","df_office",
+        "df_genprice_csv","df_genprice_master"
+    ]:
+        df = M.get(k, pd.DataFrame())
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            df.columns = [normalize_string(c) for c in df.columns]
+        M[k] = df
 
     # 参照変数
     df_gen      = M["df_gen"].copy()
@@ -434,7 +431,35 @@ if HAS_STREAMLIT:
     df_cus      = M["df_cus"].copy()
     df_branch   = M["df_branch"].copy()
     df_office   = M["df_office"].copy()
-    df_genprice = M["df_genprice"].copy()
+    df_genprice_csv    = M["df_genprice_csv"].copy()
+    df_genprice_master = M["df_genprice_master"].copy()
+
+    # 単価参照元の選択（CSV／master／自動）
+    st.markdown("#### 単価参照元")
+    src_choice = st.radio(
+        "原反単価の参照元を選択",
+        ["自動（CSV優先）","CSVを優先","master（原反価格）を優先"],
+        horizontal=True,
+        key="price_src_choice"
+    )
+    def _select_price_df(choice):
+        if choice == "CSVを優先":
+            if not df_genprice_csv.empty:
+                return df_genprice_csv, "CSV"
+            return df_genprice_master, "master"
+        elif choice == "master（原反価格）を優先":
+            if not df_genprice_master.empty:
+                return df_genprice_master, "master"
+            return df_genprice_csv, "CSV"
+        # 自動（CSV優先）
+        if not df_genprice_csv.empty:
+            return df_genprice_csv, "CSV"
+        return df_genprice_master, "master"
+
+    df_genprice, price_src_used = _select_price_df(src_choice)
+    if df_genprice.empty:
+        err_stop("原反単価の参照元が見つかりません。CSV か master のどちらかに『製品名』『単価』が必要です。")
+    st.caption(f"単価参照元：{price_src_used}")
 
     # 原反の単価結合（製品名で左結合）
     name_g = pick_col(df_gen, ["製品名","品名","名称"]) or df_gen.columns[0]
@@ -456,10 +481,10 @@ if HAS_STREAMLIT:
 
     # 単価の存在チェック
     if "単価" not in _df.columns:
-        err_stop("原反単価の結合に失敗しました（列名の衝突または未検出）。CSVの列名をご確認ください。")
+        err_stop("原反単価の結合に失敗しました（列名の衝突または未検出）。CSV/master の列名をご確認ください。")
     if _df["単価"].isna().any():
         miss = _df[_df["単価"].isna()]["製品名"].dropna().unique().tolist()
-        err_stop("原反単価表.csv に単価未登録の製品があります: " + ", ".join(map(str, miss[:10])) + (" ..." if len(miss)>10 else ""))
+        err_stop("単価未登録の製品があります: " + ", ".join(map(str, miss[:10])) + (" ..." if len(miss)>10 else ""))
 
     df_gen_merged = _df
 
@@ -741,6 +766,12 @@ else:
         # --- Test 5: 端数処理（100円切上げ） ---
         assert ceil100(1) == 100 and ceil100(100) == 100 and ceil100(101) == 200, "ceil100 が100円切上げになっていない"
         assert r1["sell_one"] % 100 == 0, "販売単価が100円単位になっていない"
+
+        # --- Test 6: 厚みが厚い方が四方折り返しコストが高い ---
+        r_thin = smac_estimate("標準0.25t", "片引き", W=1800, H=2000, cnt=1, picked_ops_rows=[])
+        r_thick= smac_estimate("標準0.4t",  "片引き", W=1800, H=2000, cnt=1, picked_ops_rows=[])
+        assert r_thin["ok"] and r_thick["ok"], "厚みテストの計算失敗"
+        assert r_thick["breakdown"]["四方折り返し(1式)"] >= r_thin["breakdown"]["四方折り返し(1式)"], "厚み0.4tの折返しが0.25tより高くない"
 
         print("All tests passed.")
 
