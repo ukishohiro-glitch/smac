@@ -97,12 +97,14 @@ def extract_thickness(text: str) -> float | None:
         try: return float(m.group(1))
         except: return None
     return None
-
 def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int,
                   df_gen: pd.DataFrame, df_op: pd.DataFrame, picked_ops: list[dict]):
-    res = {"ok": False, "msg": "", "sell_one": 0, "sell_total": 0, "note_ops": []}
+    """戻り値: dict(ok, sell_one, sell_total, note_ops, breakdown)
+       ※OP金額はカーテンに内包（サマリ行は名称のみ表示）"""
+    res = {"ok": False, "msg": "", "sell_one": 0, "sell_total": 0, "note_ops": [], "breakdown": {}}
     if not middle_name or W<=0 or H<=0 or cnt<=0 or df_gen.empty:
-        res["msg"] = "S・MAC：中分類/寸法/数量/原反価格を確認してください。"; return res
+        res["msg"] = "S・MAC：中分類/寸法/数量/原反価格を確認してください。"
+        return res
 
     name_col = pick_col(df_gen, ["製品名","品名","名称"]) or df_gen.columns[0]
     w_col    = pick_col(df_gen, ["幅","巾","原反幅(mm)","原反幅"]) or df_gen.columns[1]
@@ -110,44 +112,66 @@ def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int,
     t_col    = pick_col(df_gen, ["厚み","厚さ","t"])
 
     hit = df_gen[df_gen[name_col]==middle_name]
-    if hit.empty: hit = df_gen[df_gen[name_col].astype(str).str.contains(re.escape(middle_name), na=False)]
-    if hit.empty: 
-        res["msg"] = f"S・MAC：原反価格に『{middle_name}』が見つかりません。"; return res
+    if hit.empty:
+        hit = df_gen[df_gen[name_col].astype(str).str.contains(re.escape(middle_name), na=False)]
+    if hit.empty:
+        res["msg"] = f"S・MAC：原反価格に『{middle_name}』が見つかりません。"
+        return res
 
-    gen_width = parse_float(hit.iloc[0][w_col]); gen_price = parse_float(hit.iloc[0][u_col])
+    gen_width = parse_float(hit.iloc[0][w_col])
+    gen_price = parse_float(hit.iloc[0][u_col])
     thick = extract_thickness(hit.iloc[0][t_col]) if t_col else extract_thickness(hit.iloc[0][name_col])
     if not gen_width or not gen_price:
-        res["msg"] = "S・MAC：原反幅または単価が不正です。"; return res
+        res["msg"] = "S・MAC：原反幅または単価が不正です。"
+        return res
 
-    if open_method == "片引き": cur_w = W*1.05; panels = 1
-    else:                      cur_w = (W/2)*1.05; panels = 2
+    # 寸法・枚数
+    if open_method == "片引き":
+        cur_w = W * 1.05; panels = 1
+    else:
+        cur_w = (W/2) * 1.05; panels = 2
     cur_h = H + 50
-    length_per_panel_m = (cur_h*1.2)/1000.0
-    joints = math.ceil(cur_w/gen_width)
 
-    cutting_one = (2000 if joints<=3 else 3000) * panels
-    raw_one = gen_price * length_per_panel_m * joints * panels
+    # 原価計算（1間口あたり）
+    length_per_panel_m = (cur_h * 1.2) / 1000.0       # 1パネルの必要長(m)
+    joints = math.ceil(cur_w / gen_width)            # 巾継ぎ本数
+    raw_one = gen_price * length_per_panel_m * joints * panels       # 原反
+    cutting_one = (2000 if joints <= 3 else 3000) * panels           # 裁断
+    hem_unit = 450 if (thick is not None and thick <= 0.3) else 550  # 三巻など
+    hem_perimeter_m = (cur_w + cur_w + cur_h + cur_h) / 1000.0
+    hem_total = math.ceil(hem_perimeter_m) * hem_unit * panels * cnt # ←合計
+    hem_one = hem_total / cnt                                         # 1間口あたり
 
+    # OP（1000mm切上げ・合計はカーテンに内包）
     note_ops = []; op_total = 0
-    if not df_op.empty:
-        for op in picked_ops or []:
-            name = normalize_string(op.get("OP名称","")); unit = int(parse_float(op.get("金額")) or 0)
-            dire = normalize_string(op.get("方向","")).upper()
-            if not name or unit<=0: continue
-            base_mm = cur_w if dire in ["W","横","X"] else cur_h
-            units_1000 = math.ceil(base_mm/1000.0)
-            sub = units_1000 * unit * panels * cnt
-            op_total += sub; note_ops.append(name)
+    for op in picked_ops or []:
+        name = normalize_string(op.get("OP名称",""))
+        unit = int(parse_float(op.get("金額")) or 0)
+        dire = normalize_string(op.get("方向","")).upper()
+        if not name or unit <= 0:
+            continue
+        base_mm = cur_w if dire in ["W","横","X"] else cur_h
+        units_1000 = math.ceil(base_mm/1000.0)
+        sub = units_1000 * unit * panels * cnt
+        op_total += sub
+        note_ops.append(name)
+    op_one = op_total / cnt if cnt else 0
 
-    hem_unit = 450 if (thick is not None and thick<=0.3) else 550
-    hem_perimeter_m = (cur_w+cur_w+cur_h+cur_h)/1000.0
-    hem_total = math.ceil(hem_perimeter_m)*hem_unit*panels*cnt
+    # 原価合計→売値（既存ロジックに合わせ粗利40%: /0.6）
+    genka_total = raw_one*cnt + cutting_one*cnt + hem_total + op_total
+    sell_one = ceil100((raw_one + cutting_one + hem_one + op_one) / 0.6)
+    sell_total = ceil100(genka_total / 0.6)
 
-    genka_total = int(round(raw_one*cnt + cutting_one*cnt + hem_total + op_total))
-    sell_one = ceil100((raw_one + cutting_one + (hem_total/cnt if cnt else 0) + (op_total/cnt if cnt else 0))/0.6)
-    sell_total = ceil100(genka_total/0.6)
-    res.update({"ok": True, "sell_one": int(sell_one), "sell_total": int(sell_total), "note_ops": note_ops})
+    breakdown = {
+        "原反(材料)": int(round(raw_one)),
+        "裁断":       int(round(cutting_one)),
+        "周囲三巻/縫製": int(round(hem_one)),
+        "OP合計":    int(round(op_one)),
+    }
+    res.update({"ok": True, "sell_one": int(sell_one), "sell_total": int(sell_total),
+                "note_ops": note_ops, "breakdown": breakdown})
     return res
+
 
 # ===== エア・セーブ簡易 =====
 def pick_price_col(df: pd.DataFrame):
@@ -455,6 +479,16 @@ def render_opening(idx: int):
                 note = f"W{W}×H{H}mm"
                 if sm["note_ops"]: note += "／OP：" + "・".join(sm["note_ops"])
                 overall_items.append({
+# （S・MACサマリ追加の直後）
+if sm.get("breakdown"):
+    with st.expander("原価構成（1間口あたり）", expanded=False):
+        b = sm["breakdown"]
+        dfb = pd.DataFrame(
+            {"項目": list(b.keys()), "金額": [int(b[k]) for k in b.keys()]}
+        )
+        st.dataframe(dfb, use_container_width=True, hide_index=True)
+        st.caption("※ OP金額はカーテン金額に内包・サマリには名称のみ表示")
+
                     "品名": "S・MACカーテン" + (f" {middle}" if middle else "") + (f" {st.session_state.get(pref+'open')}" if st.session_state.get(pref+'open') else ""),
                     "数量": CNT, "単位":"式", "単価": sm["sell_one"], "小計": sm["sell_total"],
                     "種別":"S・MAC", "備考": (f"符号:{mark}／" if mark else "") + note
