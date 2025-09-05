@@ -529,33 +529,39 @@ def render_opening(idx: int):
                 })
                 overall_total_update(sm["sell_total"])
 
-                # 原価構成（1間口あたり）を表示
-                bd = sm.get("breakdown")
+                                # 原価構成（1間口あたり）を表示
+                bd = sm.get("breakdown", {})
                 if bd:
                     with st.expander("原価構成（1間口あたり）", expanded=False):
-    bd = sm.get("breakdown", {})
-    order = [
-        "原反使用量(m)", "原反幅(mm)", "原反単価(円/m)",
-        "原反材料(1式)", "裁断賃(1式)", "幅繋ぎ(1式)", "四方折り返し(1式)", "OP加算(1式)",
-        "原価(1式)", "販売単価(1式)", "販売金額(数量分)", "粗利率"
-    ]
-    rows = []
-    for k in order:
-        if k not in bd: continue
-        v = bd[k]
-        if k == "原反使用量(m)":
-            rows.append([k, f"{float(v):.2f} m"])
-        elif k == "原反幅(mm)":
-            rows.append([k, f"{int(v)} mm"])
-        elif k == "原反単価(円/m)":
-            rows.append([k, f"¥{int(v):,}/m"])
-        elif k == "粗利率":
-            rows.append([k, f"{float(v)*100:.1f}%"])
-        else:
-            rows.append([k, f"¥{int(v):,}"])
-    st.dataframe(pd.DataFrame(rows, columns=["項目","金額"]), use_container_width=True, hide_index=True)
+                        order = [
+                            "原反使用量(m)", "原反幅(mm)", "原反単価(円/m)",
+                            "原反材料(1式)", "裁断賃(1式)", "幅繋ぎ(1式)", "四方折り返し(1式)", "OP加算(1式)",
+                            "原価(1式)", "販売単価(1式)", "販売金額(数量分)", "粗利率"
+                        ]
+                        rows = []
+                        for k in order:
+                            if k not in bd:
+                                continue
+                            v = bd[k]
+                            if k == "原反使用量(m)":
+                                rows.append([k, f"{float(v):.2f} m"])
+                            elif k == "原反幅(mm)":
+                                rows.append([k, f"{int(v)} mm"])
+                            elif k == "原反単価(円/m)":
+                                rows.append([k, f"¥{int(v):,}/m"])
+                            elif k == "粗利率":
+                                rows.append([k, f"{float(v)*100:.1f}%"])
+                            else:
+                                rows.append([k, f"¥{int(v):,}"])
 
+                        st.dataframe(
+                            pd.DataFrame(rows, columns=["項目", "金額"]),
+                            use_container_width=True, hide_index=True
+                        )
+            else:
+                # ここは sm["ok"] が False のときに出す警告
                 st.warning(sm.get("msg") or "S・MACの計算に失敗しました。")
+
 
         elif large=="エア・セーブ" and air_type:
             if air_type=="MA" and air_item and perf:
