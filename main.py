@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-main.py（フル実装・外部定型文/ダミーなし） — シート名「カーテン」「OP」に対応 & Streamlit無でも落ちない
+main.py（フル実装・外部定型文/ダミーなし） — シート名「カーテン」「OP」に対応 & 得意先系シートが無くてもUIで手入力に自動フォールバック
 
-今回の修正点：
-- master.xlsx の原反マスタが **「カーテン」**、OPマスタが **「OP」** にある前提を最優先で解決するよう変更。
-- シート名突合は記号差（・ - _ / . と空白）、全半角、大/小文字差を吸収して照合。
-- Streamlit 未導入環境では UI をスキップし、**CLIテスト**を実行（`sys.exit` は一切使わない）。
-- 既存テスト維持＋**端数処理の追加テスト**を搭載。
+今回の修正点（エラー解消）：
+- 画像の例外は、得意先系シート（得意先/支店/営業所）が存在しないにもかかわらず **必須扱い** で解決を試み、`HaltError` を投げていたことが原因。
+- これらのシートを **任意扱い** に変更し、見つからない場合は **テキスト入力に自動フォールバック** するように修正。
+- `_try_resolve_sheet` を追加して、任意シートは見つからなければ `None` を返す設計に変更。
+- 既存テストは維持、`sys.exit` は不使用のまま。
 
 使い方：
 - GUI（推奨）：`pip install streamlit pandas openpyxl` → `streamlit run main.py`
@@ -115,6 +115,13 @@ if HAS_STREAMLIT:
                 return book[k]
         raise HaltError("必要なシートが見つかりません: " + ", ".join(candidates))
 
+    # 見つからない場合は None を返す（任意シート向け）
+    def _try_resolve_sheet(xls: pd.ExcelFile, candidates: list[str]):
+        try:
+            return _resolve_sheet(xls, candidates)
+        except HaltError:
+            return None
+
     @st.cache_data(show_spinner=False)
     def load_all():
         must_exist(REQ_MASTER, "master.xlsx")
@@ -123,24 +130,27 @@ if HAS_STREAMLIT:
         xls = pd.ExcelFile(REQ_MASTER)
 
         # ★ユーザー指定を最優先（原反=カーテン、OP=OP）。記号差にも強い候補一覧。
-        sheet_gen_candidates    = ["カーテン", "SMAC原反", "SMAC原反マスタ", "S MAC原反", "SMAC原反候補", "原反マスタ", "原反"]
+        sheet_gen_candidates    = ["カーテン", "SMAC原反", "SMAC原反マスタ", "S MAC原反", "原反マスタ", "原反"]
         sheet_op_candidates     = ["OP", "SMAC-OP", "SMAC_OP", "SMACOP", "OPマスタ"]
+        # 以下は任意
         sheet_cat_candidates    = ["カーテン", "カーテンマスタ"]
         sheet_perf_candidates   = ["カーテン性能", "性能", "性能マスタ"]
         sheet_cus_candidates    = ["得意先", "顧客", "取引先"]
         sheet_branch_candidates = ["支店", "部署", "部支店"]
         sheet_office_candidates = ["営業所", "事業所", "オフィス"]
 
+        # 必須シート
         sh_gen    = _resolve_sheet(xls, sheet_gen_candidates)
         sh_op     = _resolve_sheet(xls, sheet_op_candidates)
-        sh_cat    = _resolve_sheet(xls, sheet_cat_candidates)
-        sh_perf   = _resolve_sheet(xls, sheet_perf_candidates)
-        sh_cus    = _resolve_sheet(xls, sheet_cus_candidates)
-        sh_branch = _resolve_sheet(xls, sheet_branch_candidates)
-        sh_office = _resolve_sheet(xls, sheet_office_candidates)
+        # 任意シート（無ければ None）
+        sh_cat    = _try_resolve_sheet(xls, sheet_cat_candidates)
+        sh_perf   = _try_resolve_sheet(xls, sheet_perf_candidates)
+        sh_cus    = _try_resolve_sheet(xls, sheet_cus_candidates)
+        sh_branch = _try_resolve_sheet(xls, sheet_branch_candidates)
+        sh_office = _try_resolve_sheet(xls, sheet_office_candidates)
 
         def rd(name):
-            return pd.read_excel(REQ_MASTER, sheet_name=name)
+            return pd.read_excel(REQ_MASTER, sheet_name=name) if name else pd.DataFrame()
 
         df_gen     = rd(sh_gen)
         df_op      = rd(sh_op)
@@ -150,21 +160,29 @@ if HAS_STREAMLIT:
         df_branch  = rd(sh_branch)
         df_office  = rd(sh_office)
 
-        # 最低限の検証
+        # 検証（必須のみ）
         for name, df, must in [
             (sh_gen,    df_gen,     ["製品名","原反幅(mm)","厚み"]),
             (sh_op,     df_op,      ["OP名称","金額","方向"]),
-            (sh_cat,    df_catalog, ["大分類","中分類"]),
-            (sh_perf,   df_perf,    ["中分類","性能"]),
-            (sh_cus,    df_cus,     ["社名"]),
-            (sh_branch, df_branch,  ["社名","支店名"]),
-            (sh_office, df_office,  ["社名","支店名","営業所名"]),
         ]:
             if df.empty:
                 err_stop(f"master.xlsx のシート『{name}』が見つからないか空です。")
             miss = [c for c in must if pick_col(df, [c]) is None]
             if miss:
                 err_stop(f"シート『{name}』に必須列がありません: {miss}")
+
+        # 任意シート（存在すれば列チェック）
+        for name, df, must in [
+            (sh_cat,    df_catalog, ["大分類","中分類"]),
+            (sh_perf,   df_perf,    ["中分類","性能"]),
+            (sh_cus,    df_cus,     ["社名"]),
+            (sh_branch, df_branch,  ["社名","支店名"]),
+            (sh_office, df_office,  ["社名","支店名","営業所名"]),
+        ]:
+            if name and not df.empty:
+                miss = [c for c in must if pick_col(df, [c]) is None]
+                if miss:
+                    err_stop(f"シート『{name}』に必須列がありません: {miss}")
 
         # 原反単価（CSV）
         df_genprice = pd.read_csv(REQ_GENCSV, encoding="utf-8")
@@ -441,25 +459,34 @@ if HAS_STREAMLIT:
         if "created_disp" not in st.session_state:
             st.session_state["created_disp"] = datetime.today().strftime("%Y/%m/%d")
 
-        # 連動プルダウン
-        c_cus = pick_col(df_cus, ["社名"]) or df_cus.columns[0]
-        c_b_cus = pick_col(df_branch, ["社名"]) or df_branch.columns[0]
-        c_b = pick_col(df_branch, ["支店名","支店"]) or df_branch.columns[1]
-        c_o_cus = pick_col(df_office, ["社名"]) or df_office.columns[0]
-        c_o_b = pick_col(df_office, ["支店名","支店"]) or df_office.columns[1]
-        c_o = pick_col(df_office, ["営業所名","営業所"]) or df_office.columns[2]
+        # 連動プルダウン（得意先マスタが無ければ手入力に自動フォールバック）
+        if not df_cus.empty and not df_branch.empty and not df_office.empty:
+            c_cus = pick_col(df_cus, ["社名"]) or df_cus.columns[0]
+            c_b_cus = pick_col(df_branch, ["社名"]) or df_branch.columns[0]
+            c_b = pick_col(df_branch, ["支店名","支店"]) or df_branch.columns[1]
+            c_o_cus = pick_col(df_office, ["社名"]) or df_office.columns[0]
+            c_o_b = pick_col(df_office, ["支店名","支店"]) or df_office.columns[1]
+            c_o = pick_col(df_office, ["営業所名","営業所"]) or df_office.columns[2]
 
-        cus_list = df_cus[c_cus].dropna().unique().tolist()
+            cus_list = df_cus[c_cus].dropna().unique().tolist()
 
-        col1, col2, col3 = st.columns([1.0, 1.0, 1.0])
-        with col1:
-            customer = st.selectbox("社名（得意先名）", cus_list, index=0 if cus_list else None, key="customer")
-        with col2:
-            branches = df_branch[df_branch[c_b_cus]==customer][c_b].dropna().unique().tolist()
-            branch = st.selectbox("支店名", branches, index=0 if branches else None, key="branch")
-        with col3:
-            offices = df_office[(df_office[c_o_cus]==customer) & (df_office[c_o_b]==branch)][c_o].dropna().unique().tolist()
-            office = st.selectbox("営業所名", offices, index=0 if offices else None, key="office")
+            col1, col2, col3 = st.columns([1.0, 1.0, 1.0])
+            with col1:
+                customer = st.selectbox("社名（得意先名）", cus_list, index=0 if cus_list else None, key="customer")
+            with col2:
+                branches = df_branch[df_branch[c_b_cus]==customer][c_b].dropna().unique().tolist()
+                branch = st.selectbox("支店名", branches, index=0 if branches else None, key="branch")
+            with col3:
+                offices = df_office[(df_office[c_o_cus]==customer) & (df_office[c_o_b]==branch)][c_o].dropna().unique().tolist()
+                office = st.selectbox("営業所名", offices, index=0 if offices else None, key="office")
+        else:
+            col1, col2, col3 = st.columns([1.0, 1.0, 1.0])
+            with col1:
+                customer = st.text_input("社名（得意先名）", value=st.session_state.get("customer",""), key="customer")
+            with col2:
+                branch = st.text_input("支店名", value=st.session_state.get("branch",""), key="branch")
+            with col3:
+                office = st.text_input("営業所名", value=st.session_state.get("office",""), key="office")
 
         col4, col5, col6 = st.columns([0.8, 0.6, 1.4])
         with col4:
@@ -474,7 +501,7 @@ if HAS_STREAMLIT:
 
         st.caption(
             f"見積番号：{st.session_state['estimate_no']} / 作成日：{st.session_state['created_disp']} / "
-            f"得意先：{customer} / 支店：{branch} / 営業所：{office} / 物件名：{project or '（未入力）'}"
+            f"得意先：{customer or '（未入力）'} / 支店：{branch or '（未入力）'} / 営業所：{office or '（未入力）'} / 物件名：{project or '（未入力）'}"
         )
         st.markdown("---")
 
@@ -502,10 +529,12 @@ if HAS_STREAMLIT:
         mids = df_gen_merged[name_g].dropna().unique().tolist()
         mid = st.selectbox("中分類（原反・製品名）", [""]+mids, key=pref+"mid")
 
-        # 性能（中分類＝製品名として紐付け）
-        perf_mid_col  = pick_col(df_perf, ["中分類"]) or df_perf.columns[0]
-        perf_perf_col = pick_col(df_perf, ["性能"]) or df_perf.columns[1]
-        perf_opts = df_perf[df_perf[perf_mid_col]==mid][perf_perf_col].dropna().unique().tolist() if mid else []
+        # 性能（任意）
+        perf_opts = []
+        if not M["df_perf"].empty:
+            perf_mid_col  = pick_col(M["df_perf"], ["中分類"]) or M["df_perf"].columns[0]
+            perf_perf_col = pick_col(M["df_perf"], ["性能"]) or M["df_perf"].columns[1]
+            perf_opts = M["df_perf"][M["df_perf"][perf_mid_col]==mid][perf_perf_col].dropna().unique().tolist() if mid else []
         _ = st.selectbox("カーテン性能（任意）", [""]+perf_opts, key=pref+"perf")
 
         open_mtd = st.radio("片引き/引分け", ["片引き","引分け"], key=pref+"open", horizontal=True)
