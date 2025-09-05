@@ -526,6 +526,8 @@ def render_opening(idx: int):
                     "小計": sm["sell_total"],
                     "種別": "S・MAC",
                     "備考": (f"符号:{mark}／" if mark else "") + note
+                    "間口": idx,   # ← これを辞書の中に追加
+
                 })
                 overall_total_update(sm["sell_total"])
 
@@ -571,6 +573,8 @@ def render_opening(idx: int):
                         "品名": f"エア・セーブ MA型折りたたみ式 {air_item}",
                         "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["total"],
                         "種別":"エア・セーブMA", "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
+                        "間口": idx,   # ← これを辞書の中に追加
+
                     })
                     overall_total_update(r["total"])
 
@@ -583,6 +587,8 @@ def render_opening(idx: int):
                         "種別":"エア・セーブMB",
                         "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
                                  + (f"／{st.session_state.get(pref+'rib')}" if st.session_state.get(pref+'rib') else "")
+                        "間口": idx,   # ← これを辞書の中に追加
+
                     })
                     overall_total_update(r["total"])
 
@@ -595,13 +601,18 @@ def render_opening(idx: int):
                         "品名": f"エア・セーブ MC型スライド式 {air_item}",
                         "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["price_one"]*CNT,
                         "種別":"エア・セーブMC",
+                        "間口": idx,   # ← これを辞書の中に追加
                         "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
                                  + (f"／{st.session_state.get(pref+'rib')}" if st.session_state.get(pref+'rib') else "")
                                  + (f"／{st.session_state.get(pref+'open')}" if st.session_state.get(pref+'open') else "")
+                        "間口": idx,   # ← これを辞書の中に追加
+
                     })
                     overall_items.append({
                         "品名": "スライドレール", "数量": 1, "単位":"式", "単価": rail, "小計": rail,
                         "種別":"エア・セーブMC", "備考": "W×2を2000mm刻み"
+                        "間口": idx,   # ← これを辞書の中に追加
+
                     })
                     overall_total_update(total)
 
@@ -616,6 +627,8 @@ def render_opening(idx: int):
                             "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["total"],
                             "種別":"エア・セーブME(カーテン)",
                             "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
+                            "間口": idx,   # ← これを辞書の中に追加
+
                         })
                         total_me += r["total"]
                 if st.session_state.get(pref+"me_motor"):
@@ -625,6 +638,8 @@ def render_opening(idx: int):
                             "品名": f"エア・セーブ ME型電動式 駆動部 {st.session_state[pref+'me_motor']}",
                             "数量": CNT, "単位":"式", "単価": mu, "小計": mu*CNT,
                             "種別":"エア・セーブME(駆動部)", "備考": ""
+                            "間口": idx,   # ← これを辞書の中に追加
+
                         })
                         total_me += mu*CNT
                 if total_me>0:
@@ -677,6 +692,8 @@ def render_opening(idx: int):
                         overall_items.append({
                             "品名": sel, "数量": qty, "単位":"式", "単価": unit, "小計": subtotal,
                             "種別":"部材", "備考": (f"符号:{mark}" if mark else "") + (f"／{label}" if label else "")
+                            "間口": idx,   # ← これを辞書の中に追加
+
                         })
                         overall_total_update(subtotal)
             st.session_state[rows_key] = updated_rows
@@ -696,6 +713,8 @@ def render_opening(idx: int):
             overall_items.append({
                 "品名": "（定型文）", "数量": "", "単位":"", "単価": "", "小計":"", "種別":"メモ",
                 "備考": " / ".join(phr_sel)
+                "間口": idx,   # ← これを辞書の中に追加
+
             })
     else:
         st.caption("※このカーテン構成では部材の追加は行いません。")
@@ -812,3 +831,98 @@ with c2:
             except Exception as e:
                 st.error("Excel出力でエラーが発生しました。")
                 st.exception(e)
+
+from io import BytesIO
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
+
+def build_estimate_workbook(header: dict, items: list[dict]) -> BytesIO:
+    """
+    items: overall_items を想定（'品名','数量','単位','単価','小計','種別','備考','間口' を使用）
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "お見積書（明細）"
+
+    # ----- 体裁 -----
+    thin = Side(style="thin", color="999999")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    head_fill = PatternFill("solid", fgColor="F2F2F2")
+    yen_fmt = '"¥"#,##0'
+    int_fmt = '#,##0'
+
+    # 列幅
+    widths = [36, 8, 7, 11, 12, 12, 56]  # 品名,数量,単位,単価,小計,種別,備考
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    # ----- 表紙的な情報 -----
+    r = 1
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=7)
+    ws.cell(r, 1, "お見積書（明細）").font = Font(size=14, bold=True)
+    r += 2
+    ws.cell(r, 1, "見積番号"); ws.cell(r, 2, header.get("estimate_no",""))
+    ws.cell(r, 4, "作成日");   ws.cell(r, 5, header.get("date",""))
+    r += 1
+    ws.cell(r, 1, "得意先");   ws.cell(r, 2, header.get("customer_name",""))
+    ws.cell(r, 4, "部署・支店"); ws.cell(r, 5, header.get("branch_name",""))
+    r += 1
+    ws.cell(r, 1, "事業所");   ws.cell(r, 2, header.get("office_name",""))
+    ws.cell(r, 4, "ご担当");   ws.cell(r, 5, header.get("person_name",""))
+    r += 2
+
+    # ----- 明細ヘッダ -----
+    hdr = ["品名", "数量", "単位", "単価", "小計", "種別", "備考"]
+    for c, text in enumerate(hdr, start=1):
+        cell = ws.cell(r, c, text)
+        cell.font = Font(bold=True); cell.fill = head_fill
+        cell.alignment = Alignment(horizontal="center")
+        cell.border = border
+    r += 1
+
+    # ----- データ行（間口ごとに1行空ける） -----
+    items_sorted = sorted(items, key=lambda x: (x.get("間口", 0), x.get("種別",""), x.get("品名","")))
+    prev_opening = None
+    total = 0
+
+    for it in items_sorted:
+        opening = it.get("間口")
+        if prev_opening is not None and opening != prev_opening:
+            r += 1  # 間口が変わるたびに1行空け
+        prev_opening = opening
+
+        row_vals = [
+            it.get("品名",""),
+            it.get("数量","") if it.get("数量","")!="" else None,
+            it.get("単位",""),
+            it.get("単価","") if it.get("単価","")!="" else None,
+            it.get("小計","") if it.get("小計","")!="" else None,
+            it.get("種別",""),
+            it.get("備考",""),
+        ]
+        for c, v in enumerate(row_vals, start=1):
+            cell = ws.cell(r, c, v)
+            cell.border = border
+            if c in (2,4,5) and isinstance(v, (int, float)):
+                cell.number_format = int_fmt if c==2 else yen_fmt
+            if c == 2: cell.alignment = Alignment(horizontal="right")
+            if c in (4,5): cell.alignment = Alignment(horizontal="right")
+        if isinstance(it.get("小計"), (int, float)):
+            total += it["小計"]
+        r += 1
+
+    # ----- 合計 -----
+    r += 1
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=3)
+    ws.cell(r, 1, "合計").font = Font(bold=True)
+    ws.cell(r, 5, total).number_format = yen_fmt
+    ws.cell(r, 5).font = Font(bold=True)
+
+    # 罫線（合計行）
+    for c in (1,5):
+        ws.cell(r, c).border = border
+
+    bio = BytesIO(); wb.save(bio); bio.seek(0)
+    return bio
+
