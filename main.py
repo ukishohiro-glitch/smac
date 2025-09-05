@@ -1,3 +1,7 @@
+from pathlib import Path
+APP_DIR = Path(__file__).parent
+TEMPLATE_BOOK = APP_DIR / "お見積書（明細）.xlsx"
+MASTER_BOOK   = APP_DIR / "master.xlsx"
 # -*- coding: utf-8 -*-
 # main.py — ①大分類ラジオ ②片引き/引分けラジオ ③部材品名ラジオ ④定型文チェック ⑤Excel出力(お見積書(明細)) 対応版
 from __future__ import annotations
@@ -90,88 +94,102 @@ def load_master():
             df_ma, df_mb_tbl, df_mc, df_me_curt, df_me_motor,
             df_op, df_gap, df_parts, df_gen)
 
-# ===== S・MAC計算（簡略） =====
+# ===== S・MAC計算（原価内訳を返す版） =====
 def extract_thickness(text: str) -> float | None:
     m = re.search(r"(\d+(?:\.\d+)?)\s*t", str(text or "")); 
     if m:
         try: return float(m.group(1))
         except: return None
     return None
+
 def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int,
                   df_gen: pd.DataFrame, df_op: pd.DataFrame, picked_ops: list[dict]):
-    """戻り値: dict(ok, sell_one, sell_total, note_ops, breakdown)
-       ※OP金額はカーテンに内包（サマリ行は名称のみ表示）"""
+    """
+    戻り値:
+      {
+        ok, msg, sell_one, sell_total, note_ops,
+        breakdown: {
+          "原反材料(1式)", "カット工賃(1式)", "ヘム加工(合計)", "OP加算(合計)",
+          "原価(1式)", "原価(数量分)", "販売単価(1式)", "販売金額(数量分)", "粗利率"
+        }
+      }
+    """
     res = {"ok": False, "msg": "", "sell_one": 0, "sell_total": 0, "note_ops": [], "breakdown": {}}
     if not middle_name or W<=0 or H<=0 or cnt<=0 or df_gen.empty:
-        res["msg"] = "S・MAC：中分類/寸法/数量/原反価格を確認してください。"
-        return res
+        res["msg"] = "S・MAC：中分類/寸法/数量/原反価格を確認してください。"; return res
 
     name_col = pick_col(df_gen, ["製品名","品名","名称"]) or df_gen.columns[0]
-    w_col    = pick_col(df_gen, ["幅","巾","原反幅(mm)","原反幅"]) or df_gen.columns[1]
+    w_col    = pick_col(df_gen, ["原反幅(mm)","原反幅","幅","巾"]) or df_gen.columns[1]
     u_col    = pick_col(df_gen, ["単価","上代","価格","金額"]) or df_gen.columns[2]
     t_col    = pick_col(df_gen, ["厚み","厚さ","t"])
 
     hit = df_gen[df_gen[name_col]==middle_name]
-    if hit.empty:
-        hit = df_gen[df_gen[name_col].astype(str).str.contains(re.escape(middle_name), na=False)]
-    if hit.empty:
-        res["msg"] = f"S・MAC：原反価格に『{middle_name}』が見つかりません。"
-        return res
+    if hit.empty: hit = df_gen[df_gen[name_col].astype(str).str.contains(re.escape(middle_name), na=False)]
+    if hit.empty: 
+        res["msg"] = f"S・MAC：原反価格に『{middle_name}』が見つかりません。"; return res
 
-    gen_width = parse_float(hit.iloc[0][w_col])
-    gen_price = parse_float(hit.iloc[0][u_col])
+    gen_width = parse_float(hit.iloc[0][w_col]); gen_price = parse_float(hit.iloc[0][u_col])
     thick = extract_thickness(hit.iloc[0][t_col]) if t_col else extract_thickness(hit.iloc[0][name_col])
     if not gen_width or not gen_price:
-        res["msg"] = "S・MAC：原反幅または単価が不正です。"
-        return res
+        res["msg"] = "S・MAC：原反幅または単価が不正です。"; return res
 
-    # 寸法・枚数
+    # 寸法（片引きはWそのまま、引分けは半分×2パネル）
     if open_method == "片引き":
-        cur_w = W * 1.05; panels = 1
+        cur_w = W*1.05; panels = 1
     else:
-        cur_w = (W/2) * 1.05; panels = 2
+        cur_w = (W/2)*1.05; panels = 2
     cur_h = H + 50
+    length_per_panel_m = (cur_h*1.2)/1000.0
+    joints = math.ceil(cur_w/gen_width)
 
-    # 原価計算（1間口あたり）
-    length_per_panel_m = (cur_h * 1.2) / 1000.0       # 1パネルの必要長(m)
-    joints = math.ceil(cur_w / gen_width)            # 巾継ぎ本数
-    raw_one = gen_price * length_per_panel_m * joints * panels       # 原反
-    cutting_one = (2000 if joints <= 3 else 3000) * panels           # 裁断
-    hem_unit = 450 if (thick is not None and thick <= 0.3) else 550  # 三巻など
-    hem_perimeter_m = (cur_w + cur_w + cur_h + cur_h) / 1000.0
-    hem_total = math.ceil(hem_perimeter_m) * hem_unit * panels * cnt # ←合計
-    hem_one = hem_total / cnt                                         # 1間口あたり
+    # 原価内訳（1式／合計）
+    raw_one = gen_price * length_per_panel_m * joints * panels      # 原反材料費（1式）
+    cutting_one = (2000 if joints<=3 else 3000) * panels            # カット工賃（1式）
 
-    # OP（1000mm切上げ・合計はカーテンに内包）
+    # OP（方向：W/横/X は幅基準、その他は高さ基準）— 合計で管理
     note_ops = []; op_total = 0
-    for op in picked_ops or []:
-        name = normalize_string(op.get("OP名称",""))
-        unit = int(parse_float(op.get("金額")) or 0)
-        dire = normalize_string(op.get("方向","")).upper()
-        if not name or unit <= 0:
-            continue
-        base_mm = cur_w if dire in ["W","横","X"] else cur_h
-        units_1000 = math.ceil(base_mm/1000.0)
-        sub = units_1000 * unit * panels * cnt
-        op_total += sub
-        note_ops.append(name)
-    op_one = op_total / cnt if cnt else 0
+    if not df_op.empty:
+        for op in picked_ops or []:
+            name = normalize_string(op.get("OP名称","")); unit = int(parse_float(op.get("金額")) or 0)
+            dire = normalize_string(op.get("方向","")).upper()
+            if not name or unit<=0: continue
+            base_mm = cur_w if dire in ["W","横","X"] else cur_h
+            units_1000 = math.ceil(base_mm/1000.0)
+            sub = units_1000 * unit * panels * cnt
+            op_total += sub; note_ops.append(name)
 
-    # 原価合計→売値（既存ロジックに合わせ粗利40%: /0.6）
-    genka_total = raw_one*cnt + cutting_one*cnt + hem_total + op_total
-    sell_one = ceil100((raw_one + cutting_one + hem_one + op_one) / 0.6)
-    sell_total = ceil100(genka_total / 0.6)
+    # ヘム加工（厚みに応じた単価）
+    hem_unit = 450 if (thick is not None and thick<=0.3) else 550
+    hem_perimeter_m = (cur_w+cur_w+cur_h+cur_h)/1000.0
+    hem_total = math.ceil(hem_perimeter_m)*hem_unit*panels*cnt
 
-    breakdown = {
-        "原反(材料)": int(round(raw_one)),
-        "裁断":       int(round(cutting_one)),
-        "周囲三巻/縫製": int(round(hem_one)),
-        "OP合計":    int(round(op_one)),
-    }
-    res.update({"ok": True, "sell_one": int(sell_one), "sell_total": int(sell_total),
-                "note_ops": note_ops, "breakdown": breakdown})
+    # 原価集計
+    genka_one   = raw_one + cutting_one + (hem_total/cnt if cnt else 0) + (op_total/cnt if cnt else 0)
+    genka_total = int(round(raw_one*cnt + cutting_one*cnt + hem_total + op_total))
+
+    # 販売（粗利40%想定 → 原価/0.6 を100円単位切上げ）
+    sell_one   = ceil100(genka_one/0.6)
+    sell_total = ceil100(genka_total/0.6)
+
+    # 返却
+    res.update({
+        "ok": True,
+        "sell_one": int(sell_one),
+        "sell_total": int(sell_total),
+        "note_ops": note_ops,
+        "breakdown": {
+            "原反材料(1式)":      int(round(raw_one)),
+            "カット工賃(1式)":    int(round(cutting_one)),
+            "ヘム加工(合計)":     int(round(hem_total)),
+            "OP加算(合計)":       int(round(op_total)),
+            "原価(1式)":          int(round(genka_one)),
+            "原価(数量分)":       int(round(genka_total)),
+            "販売単価(1式)":      int(sell_one),
+            "販売金額(数量分)":    int(sell_total),
+            "粗利率":             max(0.0, 1.0 - (genka_total / sell_total)) if sell_total else 0.0,
+        }
+    })
     return res
-
 
 # ===== エア・セーブ簡易 =====
 def pick_price_col(df: pd.DataFrame):
@@ -388,7 +406,8 @@ def overall_total_update(v):
 # ===== 間口 =====
 def render_opening(idx: int):
     pref = f"o{idx}_"
-    # 行A
+
+    # 行A：基本寸法
     a1,a2,a3,a4 = st.columns([0.7,1.0,1.0,0.7])
     with a1: mark = st.text_input("符号", key=pref+"mark")
     with a2: W = st.number_input("間口W (mm)", min_value=0, value=0, step=50, key=pref+"w")
@@ -396,7 +415,8 @@ def render_opening(idx: int):
     with a4: CNT = st.number_input("数量", min_value=1, value=1, step=1, key=pref+"cnt")
 
     sec_title("カーテン入力")
-    # 行B：①大分類ラジオ
+
+    # 行B：①大分類ラジオ／中分類・小分類 or エア・セーブ型式
     b1,b2,b3 = st.columns([1.0,1.0,1.0])
     with b1:
         large_list = []
@@ -405,13 +425,16 @@ def render_opening(idx: int):
         if "エア・セーブ" not in large_list:
             large_list.append("エア・セーブ")
         large = st.radio("カーテン大分類", [""]+large_list, key=pref+"large", horizontal=True)
-    air_type = None; middle = small = perf = ""; rib_note = ""
 
-    # B2/B3
+    air_type = None
+    middle = small = perf = ""
+    rib_note = ""
+
     with b2:
         if large and large != "エア・セーブ":
             mids = df_curtain[df_curtain["大分類"]==large]["中分類"].dropna().unique().tolist() if "中分類" in df_curtain.columns else []
             middle = st.selectbox("カーテン中分類", [""]+mids, key=pref+"mid")
+
     with b3:
         if large == "エア・セーブ":
             air_label = st.radio("型式（MA・MB・MC・ME）", ["","MA型折りたたみ式","MB型固定式","MC型スライド式","ME型電動式"], key=pref+"airtype", horizontal=True)
@@ -421,16 +444,18 @@ def render_opening(idx: int):
                 small_opts = df_curtain[(df_curtain["大分類"]==large)&(df_curtain["中分類"]==middle)]["小分類"].dropna().unique().tolist() if "小分類" in df_curtain.columns else []
                 small = st.selectbox("カーテン小分類", [""]+small_opts, key=pref+"small")
 
-    # 行C：②片引き/引分けラジオ + 付帯
+    # 行C：②片引き/引分けラジオ + リブ有無 + 性能など
     c1,c2,c3,c4 = st.columns([0.8,0.8,1.2,1.0])
     with c1:
         if large in ["S・MACカーテン"] or (large=="エア・セーブ" and air_type in ["MC","ME"]):
             open_mtd = st.radio("片引き/引分け", ["","片引き","引分け"], key=pref+"open", horizontal=True)
         else:
             open_mtd = ""
+
     with c2:
         if large=="エア・セーブ" and air_type in ["MB","MC","ME"]:
             rib_note = st.radio("リブ付き/リブ無し", ["","リブ付き","リブ無し"], key=pref+"rib", horizontal=True)
+
     with c3:
         air_item = ""
         if large=="エア・セーブ" and air_type:
@@ -451,6 +476,7 @@ def render_opening(idx: int):
                 curt_name_col = pick_col(curt_df, ["品名","製品名","名称","品番","型式"]) or (curt_df.columns[0] if not curt_df.empty else None)
                 items = curt_df[curt_name_col].dropna().unique().tolist() if curt_name_col else []
                 air_item = st.selectbox("エア・セーブ品名（カーテン）", [""]+items, key=pref+"me_curt")
+
     with c4:
         if large=="エア・セーブ":
             perf_all = df_perf["性能"].dropna().unique().tolist() if "性能" in df_perf.columns else []
@@ -459,7 +485,7 @@ def render_opening(idx: int):
             perf_opts = df_perf[df_perf["中分類"]==middle]["性能"].dropna().unique().tolist() if "中分類" in df_perf.columns else []
             perf = st.selectbox("カーテン性能", [""]+perf_opts, key=pref+"perf2")
 
-    # S・MAC OP 簡易選択（任意）
+    # S・MAC OP（任意）
     picked_ops = []
     if large=="S・MACカーテン" and not df_op.empty and all(c in df_op.columns for c in ["OP名称","金額","方向"]):
         st.caption("S・MAC OP（任意／金額はカーテンに内包）")
@@ -470,54 +496,40 @@ def render_opening(idx: int):
                 if st.checkbox(nm, key=pref+f"smac_op_{i}"):
                     picked_ops.append(df_op[df_op["OP名称"]==nm].iloc[0].to_dict())
 
-    # 計算→サマリ
+    # ここから計算 → サマリ
     if W>0 and H>0 and CNT>0:
         if large=="S・MACカーテン":
             sm = smac_estimate(middle or "", st.session_state.get(pref+"open") or "片引き",
                                W, H, CNT, df_gen, df_op, picked_ops)
-                   # サマリに追加（辞書だけで完結）
-        note = f"W{W}×H{H}mm"
-        if sm["note_ops"]:
-            note += "／OP：" + "・".join(sm["note_ops"])
+            if sm["ok"]:
+                note = f"W{W}×H{H}mm"
+                if sm["note_ops"]:
+                    note += "／OP：" + "・".join(sm["note_ops"])
+                overall_items.append({
+                    "品名": "S・MACカーテン"
+                            + (f" {middle}" if middle else "")
+                            + (f" {st.session_state.get(pref+'open')}" if st.session_state.get(pref+'open') else ""),
+                    "数量": CNT,
+                    "単位": "式",
+                    "単価": sm["sell_one"],
+                    "小計": sm["sell_total"],
+                    "種別": "S・MAC",
+                    "備考": (f"符号:{mark}／" if mark else "") + note
+                })
+                overall_total_update(sm["sell_total"])
 
-        overall_items.append({
-            "品名": "S・MACカーテン"
-                   + (f" {middle}" if middle else "")
-                   + (f" {st.session_state.get(pref+'open')}" if st.session_state.get(pref+'open') else ""),
-            "数量": CNT,
-            "単位": "式",
-            "単価": sm["sell_one"],
-            "小計": sm["sell_total"],
-            "種別": "S・MAC",
-            "備考": (f"符号:{mark}／" if mark else "") + note
-        })
-        overall_total_update(sm["sell_total"])
+                # 原価構成（1間口あたり）を表示
+                bd = sm.get("breakdown")
+                if bd:
+                    with st.expander("原価構成（1間口あたり）", expanded=False):
+                        dfb = pd.DataFrame({"項目": list(bd.keys()),
+                                            "金額": [int(bd[k]) for k in bd]})
+                        st.dataframe(dfb, use_container_width=True, hide_index=True)
+                        st.caption("※ OP金額はカーテン金額に内包・サマリには名称のみ表示")
+            else:
+                st.warning(sm.get("msg") or "S・MACの計算に失敗しました。")
 
-        # ← append の外で原価構成を表示
-        bd = sm.get("breakdown")
-        if bd:
-            with st.expander("原価構成（1間口あたり）", expanded=False):
-                dfb = pd.DataFrame(
-                    {"項目": list(bd.keys()), "金額": [int(bd[k]) for k in bd]}
-                )
-                st.dataframe(dfb, use_container_width=True, hide_index=True)
-                st.caption("※ OP金額はカーテン金額に内包・サマリには名称のみ表示")
-
-# （S・MACサマリ追加の直後）
-if sm.get("breakdown"):
-    with st.expander("原価構成（1間口あたり）", expanded=False):
-        b = sm["breakdown"]
-        dfb = pd.DataFrame(
-            {"項目": list(b.keys()), "金額": [int(b[k]) for k in b.keys()]}
-        )
-        st.dataframe(dfb, use_container_width=True, hide_index=True)
-        st.caption("※ OP金額はカーテン金額に内包・サマリには名称のみ表示")
-
-                    "品名": "S・MACカーテン" + (f" {middle}" if middle else "") + (f" {st.session_state.get(pref+'open')}" if st.session_state.get(pref+'open') else ""),
-                    "数量": CNT, "単位":"式", "単価": sm["sell_one"], "小計": sm["sell_total"],
-                    "種別":"S・MAC", "備考": (f"符号:{mark}／" if mark else "") + note
-                }); overall_total_update(sm["sell_total"])
-        if large=="エア・セーブ" and air_type:
+        elif large=="エア・セーブ" and air_type:
             if air_type=="MA" and air_item and perf:
                 r = area_price(df_ma, air_item, perf, W, H, CNT)
                 if r["ok"]:
@@ -525,17 +537,22 @@ if sm.get("breakdown"):
                         "品名": f"エア・セーブ MA型折りたたみ式 {air_item}",
                         "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["total"],
                         "種別":"エア・セーブMA", "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
-                    }); overall_total_update(r["total"])
-            if air_type=="MB" and air_item and perf:
+                    })
+                    overall_total_update(r["total"])
+
+            elif air_type=="MB" and air_item and perf:
                 r = area_price(df_mb_tbl, air_item, perf, W, H, CNT)
                 if r["ok"]:
                     overall_items.append({
                         "品名": f"エア・セーブ MB型固定式 {air_item}",
                         "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["total"],
                         "種別":"エア・セーブMB",
-                        "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm" + (f"／{st.session_state.get(pref+'rib')}" if st.session_state.get(pref+'rib') else "")
-                    }); overall_total_update(r["total"])
-            if air_type=="MC" and air_item and perf:
+                        "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
+                                 + (f"／{st.session_state.get(pref+'rib')}" if st.session_state.get(pref+'rib') else "")
+                    })
+                    overall_total_update(r["total"])
+
+            elif air_type=="MC" and air_item and perf:
                 r = area_price(df_mc, air_item, perf, W, H, CNT)
                 if r["ok"]:
                     rail = mc_slide_rail_price(W, CNT)
@@ -553,7 +570,8 @@ if sm.get("breakdown"):
                         "種別":"エア・セーブMC", "備考": "W×2を2000mm刻み"
                     })
                     overall_total_update(total)
-            if air_type=="ME" and perf:
+
+            elif air_type=="ME" and perf:
                 total_me = 0
                 if air_item:
                     curt_df = df_me_curt.copy() if not df_me_curt.empty else df_mc.copy()
@@ -564,7 +582,8 @@ if sm.get("breakdown"):
                             "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["total"],
                             "種別":"エア・セーブME(カーテン)",
                             "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
-                        }); total_me += r["total"]
+                        })
+                        total_me += r["total"]
                 if st.session_state.get(pref+"me_motor"):
                     mu = fixed_price(df_me_motor, st.session_state[pref+"me_motor"])
                     if mu>0:
@@ -572,17 +591,23 @@ if sm.get("breakdown"):
                             "品名": f"エア・セーブ ME型電動式 駆動部 {st.session_state[pref+'me_motor']}",
                             "数量": CNT, "単位":"式", "単価": mu, "小計": mu*CNT,
                             "種別":"エア・セーブME(駆動部)", "備考": ""
-                        }); total_me += mu*CNT
-                if total_me>0: overall_total_update(total_me)
+                        })
+                        total_me += mu*CNT
+                if total_me>0:
+                    overall_total_update(total_me)
 
-    # ===== 部材入力：③品名ラジオ =====
-    show_parts = (st.session_state.get(pref+"large")=="S・MACカーテン") or (st.session_state.get(pref+"large")=="エア・セーブ" and (st.session_state.get(pref+"airtype") or "").startswith("MA"))
+    # ===== 部材入力：③品名ラジオ（既存ロジック） =====
+    show_parts = (
+        st.session_state.get(pref+"large")=="S・MACカーテン" or
+        (st.session_state.get(pref+"large")=="エア・セーブ" and (st.session_state.get(pref+"airtype") or "").startswith("MA"))
+    )
     if show_parts:
         st.markdown("##### 部材入力")
         for sheet_name, dfp in df_parts.items():
             rows_key = pref + f"{sheet_name}_rows"
-            if rows_key not in st.session_state: st.session_state[rows_key] = [{"item":"", "qty":1}]
-            # セクション見出し＋追加
+            if rows_key not in st.session_state:
+                st.session_state[rows_key] = [{"item":"", "qty":1}]
+
             hcol1, hcol2 = st.columns([0.92, 0.08])
             with hcol1: st.caption(f"【{sheet_name}】")
             with hcol2:
@@ -596,7 +621,6 @@ if sm.get("breakdown"):
                 st.markdown('<div class="row-compact">', unsafe_allow_html=True)
                 col1, col2, col3, col4, col5 = st.columns([1.4,0.45,0.7,0.8,0.28])
                 with col1:
-                    # ③ ラジオボタン化
                     item_opts = [""] + names
                     current = rowdata["item"] if rowdata["item"] in item_opts else ""
                     sel = st.radio(f"品名 {j+1}", item_opts, index=item_opts.index(current), key=pref+f"{sheet_name}_item_{j}_radio")
@@ -605,7 +629,8 @@ if sm.get("breakdown"):
                 unit, label, used_m = (0,"",0.0)
                 if sel:
                     src_row = dfp[dfp[name_col]==sel].iloc[0] if not dfp.empty else None
-                    if src_row is not None: unit, label, used_m = price_part_row(sheet_name, src_row, W, H, dfp)
+                    if src_row is not None:
+                        unit, label, used_m = price_part_row(sheet_name, src_row, W, H, dfp)
                 with col3: st.text_input("単価（自動）", value=str(unit), disabled=True, key=pref+f"{sheet_name}_unit_{j}")
                 with col4: st.text_input("使用m数（自動）", value=(f"{used_m:g}" if used_m else ""), disabled=True, key=pref+f"{sheet_name}_m_{j}")
                 with col5: delete = st.button("×", key=pref+f"{sheet_name}_del_{j}")
