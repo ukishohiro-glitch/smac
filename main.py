@@ -4,7 +4,6 @@ TEMPLATE_BOOK = APP_DIR / "お見積書（明細）.xlsx"
 MASTER_BOOK   = APP_DIR / "master.xlsx"
 # -*- coding: utf-8 -*-
 # main.py — ①大分類ラジオ ②片引き/引分けラジオ ③部材品名ラジオ ④定型文チェック ⑤Excel出力(お見積書(明細)) 対応版
-from __future__ import annotations
 import os, os.path as osp, secrets, math, re, unicodedata
 from datetime import datetime, date
 import pandas as pd
