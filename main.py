@@ -573,7 +573,7 @@ def render_opening(idx: int):
                         "品名": f"エア・セーブ MA型折りたたみ式 {air_item}",
                         "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["total"],
                         "種別":"エア・セーブMA", "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
-                        "間口": idx,   # ← これを辞書の中に追加
+                        "間口": idx,
 
                     })
                     overall_total_update(r["total"])
@@ -587,7 +587,7 @@ def render_opening(idx: int):
                         "種別":"エア・セーブMB",
                         "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
                                  + (f"／{st.session_state.get(pref+'rib')}" if st.session_state.get(pref+'rib') else "")
-                        "間口": idx,   # ← これを辞書の中に追加
+                        "間口": idx,
 
                     })
                     overall_total_update(r["total"])
@@ -605,7 +605,7 @@ def render_opening(idx: int):
                         "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
                                  + (f"／{st.session_state.get(pref+'rib')}" if st.session_state.get(pref+'rib') else "")
                                  + (f"／{st.session_state.get(pref+'open')}" if st.session_state.get(pref+'open') else "")
-                        "間口": idx,   # ← これを辞書の中に追加
+                        "間口": idx,
 
                     })
                     overall_items.append({
@@ -627,7 +627,7 @@ def render_opening(idx: int):
                             "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["total"],
                             "種別":"エア・セーブME(カーテン)",
                             "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
-                            "間口": idx,   # ← これを辞書の中に追加
+                            "間口": idx,
 
                         })
                         total_me += r["total"]
