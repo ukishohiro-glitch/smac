@@ -426,16 +426,11 @@ with c2:
             header = header_dict()
             out = osp.join(save_dir, f"{st.session_state.file_title}_お見積書（明細）.xlsx")
 
-            # テンプレの探索（__file__ 非定義でも動くように TEMPLATES_* を使う）
-            try:
-                APP_DIR  # 既に定義済み
-            except NameError:
-                from pathlib import Path
-                APP_DIR = Path.cwd()
+            # テンプレ探索（__file__が無い環境でもAPP_DIR/TEMPLATE_BOOKで安全）
             tpl = str(TEMPLATE_BOOK) if TEMPLATE_BOOK.exists() else str(APP_DIR / "お見積書（明細）.xlsx")
 
             try:
-                # 新テンプレ（見積書0/1〜5）を優先
+                # 新テンプレ（見積書0/1〜5）かどうかを判定
                 use_new = False
                 if tpl and osp.exists(tpl):
                     try:
@@ -446,7 +441,7 @@ with c2:
                         use_new = False
 
                 if use_new:
-                    # 罫線/結合を維持して既存テンプレへ転記
+                    # 既存レイアウト維持で転記（ヘッダ：見積書0、明細：見積書1〜5）
                     export_quotation_book_preserve(
                         out, header, overall_items,
                         template_path=tpl,
@@ -455,7 +450,7 @@ with c2:
                         start_row=12, end_row=44,
                     )
                 else:
-                    # 旧テンプレ互換は“関数がある場合のみ”
+                    # 旧テンプレ互換は、関数が存在する時だけ使用
                     if export_detail_xlsx_preserve is None:
                         raise ImportError(
                             "旧テンプレ互換の export_detail_xlsx_preserve が見つかりません。"
@@ -474,11 +469,10 @@ with c2:
                         "ダウンロード", f.read(),
                         file_name=os.path.basename(out),
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="excel_dl_btn",
+                        key="excel_dl_btn",  # ← downloadボタンのkeyも1つだけ
                     )
             except ValueError as e:
-                # 5ページ超過などの仕様エラーはそのまま表示
-                st.error(str(e))
+                st.error(str(e))          # 例：5ページ超過
             except Exception as e:
                 st.error("Excel出力でエラーが発生しました。")
                 st.exception(e)
