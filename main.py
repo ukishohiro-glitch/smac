@@ -23,7 +23,6 @@ def _load_excel_export_from_path(mod_path):
 
 try:
     # 通常の import に成功するならそのまま使う
-    from excel_export import export_quotation_book_preserve, export_detail_xlsx_preserve
 except Exception:
     # 同ディレクトリの excel_export.py を直接ロード
     mod_file = (APP_DIR / "excel_export.py")
@@ -870,42 +869,62 @@ def export_to_detail_xlsx(out_path: str, header: dict, items: list[dict], templa
 
 # 保存UI（CSVは従来通り残しつつ、Excel出力を追加）
 sec_title("保存")
-c1, c2 = st.columns([0.6, 0.4])
-save_dir = "./data"; os.makedirs(save_dir, exist_ok=True)
-with c1:
-    st.checkbox("保存ファイル名を手動で編集する", value=st.session_state.file_title_manual, key="file_title_manual")
-    st.text_input("保存ファイル名", value=st.session_state.file_title, key="file_title", disabled=not st.session_state.file_title_manual)
-    if st.button("CSV保存", key="save_csv"):
-        meta = {
-            "見積番号": st.session_state.estimate_no, "作成日": today.strftime("%Y/%m/%d"),
-            "ファイル名": st.session_state.file_title, "得意先": st.session_state.get("client",""),
-            "支店": st.session_state.get("branch",""), "営業所": st.session_state.get("office",""),
-            "担当者": st.session_state.get("pic",""), "物件名": st.session_state.get("pj",""),
-        }
-        df_meta = pd.DataFrame([meta])
-        df_detail = pd.DataFrame(overall_items) if overall_items else pd.DataFrame(columns=["品名","数量","単位","単価","小計","種別","備考"])
-        filepath = osp.join(save_dir, f"{st.session_state.file_title}.csv")
-        with open(filepath, "w", encoding="utf-8-sig", newline="") as f:
-            df_meta.to_csv(f, index=False); f.write("\n"); df_detail.to_csv(f, index=False)
-        st.success(f"保存しました: {filepath}")
-
 with c2:
     st.markdown("**Excel保存（お見積書（明細））**")
     if st.button("Excel保存（お見積書（明細））", key="excel_save_btn"):
         if not overall_items:
-            st.error("明細がありません。"); 
+            st.error("明細がありません。")
         else:
             header = header_dict()
             out = osp.join(save_dir, f"{st.session_state.file_title}_お見積書（明細）.xlsx")
-            tpl = osp.join(osp.dirname(__file__), "お見積書（明細）.xlsx")  # あれば利用
+
+            # テンプレ探索（__file__ が無い環境でも APP_DIR/TEMPLATE_BOOK で安全）
+            tpl = str(TEMPLATE_BOOK) if TEMPLATE_BOOK.exists() else str(APP_DIR / "お見積書（明細）.xlsx")
+
             try:
-                export_to_detail_xlsx(out, header, overall_items, template_path=tpl if osp.exists(tpl) else None)
+                # 新テンプレ（見積書0/1〜5）かどうかを判定
+                use_new = False
+                if tpl and osp.exists(tpl):
+                    try:
+                        _wb_check = load_workbook(tpl, data_only=False)
+                        snames = set(_wb_check.sheetnames)
+                        use_new = ("見積書0" in snames) and all(f"見積書{i}" in snames for i in range(1,6))
+                    except Exception:
+                        use_new = False
+
+                if use_new:
+                    # 既存レイアウト維持で転記（ヘッダ：見積書0、明細：見積書1〜5）
+                    export_quotation_book_preserve(
+                        out, header, overall_items,
+                        template_path=tpl,
+                        header_sheet="見積書0",
+                        detail_sheets=[f"見積書{i}" for i in range(1,6)],
+                        start_row=12, end_row=44,
+                    )
+                else:
+                    # 旧テンプレ互換は、関数が存在する時だけ使用
+                    if export_detail_xlsx_preserve is None:
+                        raise ImportError(
+                            "旧テンプレ互換の export_detail_xlsx_preserve が見つかりません。"
+                            "テンプレートに『見積書0』『見積書1〜5』があるファイルをご用意ください。"
+                        )
+                    export_detail_xlsx_preserve(
+                        out, header, overall_items,
+                        template_path=tpl if (tpl and osp.exists(tpl)) else None,
+                        ws_name="お見積書（明細）",
+                        start_row=12, max_rows=33,
+                    )
+
                 st.success(f"Excelを保存しました：{out}")
                 with open(out, "rb") as f:
-                    st.download_button("ダウンロード", f.read(),
+                    st.download_button(
+                        "ダウンロード", f.read(),
                         file_name=os.path.basename(out),
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="excel_dl_btn")
+                        key="excel_dl_btn",
+                    )
+            except ValueError as e:
+                st.error(str(e))   # 例：5ページ超過
             except Exception as e:
                 st.error("Excel出力でエラーが発生しました。")
                 st.exception(e)
