@@ -385,7 +385,7 @@ c1, c2, c3 = st.columns([0.9, 1.2, 0.6])
 with c1: st.text_input("担当者コード", value=st.session_state.user_code, key="user_code")
 with c2:
     st.markdown("**Excel保存（お見積書（明細））**")
-        if st.button("Excel保存（お見積書（明細））", key="excel_save_btn"):
+    if st.button("Excel保存（お見積書（明細））", key="excel_save_btn"):
         if not overall_items:
             st.error("明細がありません。")
         else:
@@ -398,13 +398,13 @@ with c2:
                 if tpl and osp.exists(tpl):
                     try:
                         _wb_check = load_workbook(tpl, data_only=False)
-                        sheetnames = set(_wb_check.sheetnames)
-                        use_new = ("見積書0" in sheetnames) and any(f"見積書{i}" in sheetnames for i in range(1,6))
+                        snames = set(_wb_check.sheetnames)
+                        use_new = ("見積書0" in snames) and all(f"見積書{i}" in snames for i in range(1,6))
                     except Exception:
                         use_new = False
 
                 if use_new:
-                    # 罫線/結合/書式を維持して「見積書0/1〜5」に転記（入力順で「間口合計」を21〜44行へ）
+                    # 罫線/結合/書式を維持して「見積書0/1〜5」に転記（間口合計＝入力順で見積書0の21〜44行）
                     export_quotation_book_preserve(
                         out, header, overall_items,
                         template_path=tpl,
@@ -413,7 +413,7 @@ with c2:
                         start_row=12, end_row=44,
                     )
                 else:
-                    # 単一シート「お見積書（明細）」テンプレがある/ない両方に互換対応
+                    # 旧1枚テンプレ（互換）— こちらは“暫定”のみ。基本は新テンプレをお使いください。
                     export_detail_xlsx_preserve(
                         out, header, overall_items,
                         template_path=tpl if (tpl and osp.exists(tpl)) else None,
@@ -430,7 +430,7 @@ with c2:
                         key="excel_dl_btn",
                     )
             except ValueError as e:
-                # 例：5ページ超で「生成不可」
+                # 5ページ超過などの仕様エラーはそのまま表示
                 st.error(str(e))
             except Exception as e:
                 st.error("Excel出力でエラーが発生しました。")
