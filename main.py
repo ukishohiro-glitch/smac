@@ -458,8 +458,6 @@ else:
         template_path=tpl if (tpl and osp.exists(tpl)) else None,
         ws_name="お見積書（明細）",
         start_row=12, max_rows=33,
-    )
-
                 st.success(f"Excelを保存しました：{out}")
                 with open(out, "rb") as f:
                     st.download_button(
