@@ -1,5 +1,8 @@
 from pathlib import Path
-APP_DIR = Path(__file__).parent
+try:
+    APP_DIR = Path(__file__).parent
+except NameError:
+    APP_DIR = Path.cwd()
 TEMPLATE_BOOK = APP_DIR / "お見積書（明細）.xlsx"
 MASTER_BOOK   = APP_DIR / "master.xlsx"
 # -*- coding: utf-8 -*-
@@ -8,6 +11,7 @@ import os, os.path as osp, secrets, math, re, unicodedata
 from datetime import datetime, date
 import pandas as pd
 import streamlit as st
+from excel_export import export_quotation_book_preserve, export_detail_xlsx_preserve
 from openpyxl import Workbook, load_workbook
 
 # ===== ユーティリティ =====
@@ -379,7 +383,58 @@ st.markdown('<div class="sticky-wrap">', unsafe_allow_html=True)
 sec_title("お見積書作成システム")
 c1, c2, c3 = st.columns([0.9, 1.2, 0.6])
 with c1: st.text_input("担当者コード", value=st.session_state.user_code, key="user_code")
-with c2: st.text_input("見積番号", value=st.session_state.estimate_no, key="estimate_no")
+with c2:
+    st.markdown("**Excel保存（お見積書（明細））**")
+        if st.button("Excel保存（お見積書（明細））", key="excel_save_btn"):
+        if not overall_items:
+            st.error("明細がありません。")
+        else:
+            header = header_dict()
+            out = osp.join(save_dir, f"{st.session_state.file_title}_お見積書（明細）.xlsx")
+            tpl = str(TEMPLATE_BOOK) if TEMPLATE_BOOK.exists() else str(APP_DIR / "お見積書（明細）.xlsx")
+
+            try:
+                use_new = False
+                if tpl and osp.exists(tpl):
+                    try:
+                        _wb_check = load_workbook(tpl, data_only=False)
+                        sheetnames = set(_wb_check.sheetnames)
+                        use_new = ("見積書0" in sheetnames) and any(f"見積書{i}" in sheetnames for i in range(1,6))
+                    except Exception:
+                        use_new = False
+
+                if use_new:
+                    # 罫線/結合/書式を維持して「見積書0/1〜5」に転記（入力順で「間口合計」を21〜44行へ）
+                    export_quotation_book_preserve(
+                        out, header, overall_items,
+                        template_path=tpl,
+                        header_sheet="見積書0",
+                        detail_sheets=[f"見積書{i}" for i in range(1,6)],
+                        start_row=12, end_row=44,
+                    )
+                else:
+                    # 単一シート「お見積書（明細）」テンプレがある/ない両方に互換対応
+                    export_detail_xlsx_preserve(
+                        out, header, overall_items,
+                        template_path=tpl if (tpl and osp.exists(tpl)) else None,
+                        ws_name="お見積書（明細）",
+                        start_row=12, max_rows=33,
+                    )
+
+                st.success(f"Excelを保存しました：{out}")
+                with open(out, "rb") as f:
+                    st.download_button(
+                        "ダウンロード", f.read(),
+                        file_name=os.path.basename(out),
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="excel_dl_btn",
+                    )
+            except ValueError as e:
+                # 例：5ページ超で「生成不可」
+                st.error(str(e))
+            except Exception as e:
+                st.error("Excel出力でエラーが発生しました。")
+                st.exception(e)
 with c3:
     if st.button("見積番号を再生成", key="regen_no"):
         st.session_state.estimate_no = generate_estimate_no(st.session_state.user_code, today, st.session_state.seen_serials)
