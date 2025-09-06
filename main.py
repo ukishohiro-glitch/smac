@@ -460,8 +460,6 @@ else:
         start_row=12, max_rows=33,
     )
 
-                    )
-
                 st.success(f"Excelを保存しました：{out}")
                 with open(out, "rb") as f:
                     st.download_button(
