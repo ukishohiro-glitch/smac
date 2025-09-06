@@ -37,8 +37,9 @@ except Exception:
         for cand in [APP_DIR / "modules" / "excel_export.py", Path.cwd() / "excel_export.py"]:
             if cand.exists():
                 _mod = _load_excel_export_from_path(cand)
-                export_quotation_book_preserve = _mod.export_quotation_book_preserve
-                export_detail_xlsx_preserve    = _mod.export_detail_xlsx_preserve
+                export_quotation_book_preserve = getattr(_mod, "export_quotation_book_preserve", None)
+                export_detail_xlsx_preserve    = getattr(_mod, "export_detail_xlsx_preserve", None)
+
                 break
         else:
             raise ImportError(
