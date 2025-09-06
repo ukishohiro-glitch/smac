@@ -23,6 +23,7 @@ def _load_excel_export_from_path(mod_path):
 
 try:
     # 通常の import に成功するならそのまま使う
+    from excel_export import export_quotation_book_preserve, export_detail_xlsx_preserve
 except Exception:
     # 同ディレクトリの excel_export.py を直接ロード
     mod_file = (APP_DIR / "excel_export.py")
@@ -30,7 +31,6 @@ except Exception:
         _mod = _load_excel_export_from_path(mod_file)
         export_quotation_book_preserve = getattr(_mod, "export_quotation_book_preserve", None)
         export_detail_xlsx_preserve    = getattr(_mod, "export_detail_xlsx_preserve", None)
-
     else:
         # 代表的なサブフォルダも探索（必要なら追記してください）
         for cand in [APP_DIR / "modules" / "excel_export.py", Path.cwd() / "excel_export.py"]:
@@ -38,12 +38,12 @@ except Exception:
                 _mod = _load_excel_export_from_path(cand)
                 export_quotation_book_preserve = getattr(_mod, "export_quotation_book_preserve", None)
                 export_detail_xlsx_preserve    = getattr(_mod, "export_detail_xlsx_preserve", None)
-
                 break
         else:
             raise ImportError(
                 "excel_export.py が見つかりません。main.py と同じフォルダに置くか、探索パスを調整してください。"
             )
+
 
 from openpyxl import Workbook, load_workbook
 
