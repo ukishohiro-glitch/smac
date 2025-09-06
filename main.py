@@ -425,39 +425,49 @@ with c2:
         else:
             header = header_dict()
             out = osp.join(save_dir, f"{st.session_state.file_title}_お見積書（明細）.xlsx")
+
+            # テンプレの探索（__file__ 非定義でも動くように TEMPLATES_* を使う）
+            try:
+                APP_DIR  # 既に定義済み
+            except NameError:
+                from pathlib import Path
+                APP_DIR = Path.cwd()
             tpl = str(TEMPLATE_BOOK) if TEMPLATE_BOOK.exists() else str(APP_DIR / "お見積書（明細）.xlsx")
 
             try:
+                # 新テンプレ（見積書0/1〜5）を優先
                 use_new = False
-if tpl and osp.exists(tpl):
-    try:
-        _wb_check = load_workbook(tpl, data_only=False)
-        snames = set(_wb_check.sheetnames)
-        use_new = ("見積書0" in snames) and all(f"見積書{i}" in snames for i in range(1,6))
-    except Exception:
-        use_new = False
+                if tpl and osp.exists(tpl):
+                    try:
+                        _wb_check = load_workbook(tpl, data_only=False)
+                        snames = set(_wb_check.sheetnames)
+                        use_new = ("見積書0" in snames) and all(f"見積書{i}" in snames for i in range(1,6))
+                    except Exception:
+                        use_new = False
 
-if use_new:
-    # 新テンプレ（見積書0/1〜5）に転記：罫線・結合維持
-    export_quotation_book_preserve(
-        out, header, overall_items,
-        template_path=tpl,
-        header_sheet="見積書0",
-        detail_sheets=[f"見積書{i}" for i in range(1,6)],
-        start_row=12, end_row=44,
-    )
-else:
-    # 旧テンプレ互換は“関数がある時だけ”使用
-    if export_detail_xlsx_preserve is None:
-        raise ImportError(
-            "旧テンプレ互換の export_detail_xlsx_preserve が見つかりません。"
-            "テンプレートに『見積書0』『見積書1〜5』があるファイルをご用意ください。"
-        )
-    export_detail_xlsx_preserve(
-        out, header, overall_items,
-        template_path=tpl if (tpl and osp.exists(tpl)) else None,
-        ws_name="お見積書（明細）",
-        start_row=12, max_rows=33,
+                if use_new:
+                    # 罫線/結合を維持して既存テンプレへ転記
+                    export_quotation_book_preserve(
+                        out, header, overall_items,
+                        template_path=tpl,
+                        header_sheet="見積書0",
+                        detail_sheets=[f"見積書{i}" for i in range(1,6)],
+                        start_row=12, end_row=44,
+                    )
+                else:
+                    # 旧テンプレ互換は“関数がある場合のみ”
+                    if export_detail_xlsx_preserve is None:
+                        raise ImportError(
+                            "旧テンプレ互換の export_detail_xlsx_preserve が見つかりません。"
+                            "テンプレートに『見積書0』『見積書1〜5』があるファイルをご用意ください。"
+                        )
+                    export_detail_xlsx_preserve(
+                        out, header, overall_items,
+                        template_path=tpl if (tpl and osp.exists(tpl)) else None,
+                        ws_name="お見積書（明細）",
+                        start_row=12, max_rows=33,
+                    )
+
                 st.success(f"Excelを保存しました：{out}")
                 with open(out, "rb") as f:
                     st.download_button(
@@ -472,6 +482,7 @@ else:
             except Exception as e:
                 st.error("Excel出力でエラーが発生しました。")
                 st.exception(e)
+
 with c3:
     if st.button("見積番号を再生成", key="regen_no"):
         st.session_state.estimate_no = generate_estimate_no(st.session_state.user_code, today, st.session_state.seen_serials)
