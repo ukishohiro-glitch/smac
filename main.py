@@ -23,7 +23,6 @@ def _load_excel_export_from_path(mod_path):
 
 try:
     # 通常の import に成功するならそのまま使う
-    from excel_export import export_quotation_book_preserve, export_detail_xlsx_preserve
 except Exception:
     # 同ディレクトリの excel_export.py を直接ロード
     mod_file = (APP_DIR / "excel_export.py")
@@ -354,21 +353,35 @@ def price_part_row(part_name: str, row: pd.Series, W: int, H: int, df_sheet: pd.
         if P and P>0: return int(ceil100(P*0.5)), "", 0.0
     return 0, "", 0.0
 
-# ===== 見積番号 =====
-FY_BASE_DATE = date(2024, 10, 1)  # 37期起点
-FY_BASE_TERM = 37
-def get_term_for(today: date) -> int:
-    term = FY_BASE_TERM + (today.year - FY_BASE_DATE.year)
-    if today < date(today.year, 10, 1): term -= 1
-    return term
-def generate_estimate_no(user_code: str, today: date, seen_serials: set[str]) -> str:
-    uc = normalize_string(user_code or "").upper() or "UC"
-    term = get_term_for(today); mm = f"{today.month:02d}"
-    while True:
-        sfx = f"{secrets.randbelow(10000):04d}"
-        candidate = f"{uc}{term}{mm}-{sfx}"
-        if candidate not in seen_serials:
-            seen_serials.add(candidate); return candidate
+# ==== 見積番号 & 担当者名（ヘッダー） ====
+import secrets, re
+from datetime import datetime
+
+def _next_estimate_no():
+    # 37期=37 / 9月=09 固定 → 3709-xxxxx（xxxxxは重複しない5桁ランダム）
+    prefix = "3709-"
+    used = st.session_state.setdefault("used_estnos", set())
+    for _ in range(1000):
+        rnd = f"{secrets.randbelow(100000):05d}"
+        eno = prefix + rnd
+        if eno not in used:
+            used.add(eno)
+            return eno
+    # 念のため（衝突し続けたら時間で逃がす）
+    return prefix + datetime.now().strftime("%H%M%S")[-5:]
+
+hc1, hc2, hc3 = st.columns([2, 1, 1])
+with hc1:
+    rep_name = st.text_input("担当者名（半角英数2〜4）", value=st.session_state.get("rep_name",""), key="rep_name")
+    if rep_name and not re.fullmatch(r"[A-Za-z0-9]{2,4}", rep_name):
+        st.error("担当者名は半角英数字2〜4文字で入力してください。")
+with hc2:
+    if "estimate_no" not in st.session_state:
+        st.session_state.estimate_no = _next_estimate_no()
+    st.text_input("見積番号", st.session_state.estimate_no, key="estimate_no", disabled=True)
+with hc3:
+    st.write("")  # 余白（以前ここにボタンがあった場合の跡地）
+
 
 # ===== 画面セットアップ =====
 st.set_page_config(layout="wide", page_title="お見積書作成システム")
@@ -870,30 +883,81 @@ def export_to_detail_xlsx(out_path: str, header: dict, items: list[dict], templa
 # 保存UI（CSVは従来通り残しつつ、Excel出力を追加）
 sec_title("保存")
 with c2:
+　　# ==== 運賃・梱包（見積書0にのみ記載／明細には載せない） ====
+st.markdown("### 運賃・梱包（見積書0の末尾に記載・明細には載せません）")
+ship_c1, ship_c2 = st.columns([2, 2])
+with ship_c1:
+    ship_option = st.radio(
+        "配送条件",
+        options=["（路線便時間指定不可）", "（現場搬入時間指定可）"],
+        index=0,
+        key="ship_option",
+        horizontal=False
+    )
+with ship_c2:
+    ship_price = st.number_input(
+        "運賃・梱包 金額（円）",
+        min_value=0, step=100,
+        value=int(st.session_state.get("ship_price", 0)),
+        key="ship_price"
+    )
+
+def _shipping_required(items: list[dict]) -> bool:
+    """S・MAC または エア・セーブMA型が含まれていれば必須"""
+    import re
+    for it in items or []:
+        name = str(it.get("品名") or it.get("name") or it.get("product") or "")
+        if "S・MAC" in name:
+            return True
+        if "エア・セーブ" in name and re.search(r"\bMA\b|MA型", name):
+            return True
+    return False
+
     st.markdown("**Excel保存（お見積書（明細））**")
+    
+# （←この行は説明なので貼らなくてOK）保存セクション：この塊だけを使います
+sc1, sc2 = st.columns([1, 2])
+with sc2:
     if st.button("Excel保存（お見積書（明細））", key="excel_save_btn"):
         if not overall_items:
             st.error("明細がありません。")
         else:
-            header = header_dict()
-            out = osp.join(save_dir, f"{st.session_state.file_title}_お見積書（明細）.xlsx")
+            # 必須チェック：S・MAC or エア・セーブMA が含まれる場合、金額必須
+            if _shipping_required(overall_items) and st.session_state.get("ship_price", 0) <= 0:
+                st.error("S・MAC または エア・セーブ MA 型を含むため、運賃・梱包の金額入力が必須です。")
+                st.stop()
 
-            # テンプレ探索（__file__ が無い環境でも APP_DIR/TEMPLATE_BOOK で安全）
+            # header の追加情報（担当者名／見積番号／運賃・梱包）を統合
+            header = header_dict() if "header_dict" in globals() else {}
+            header.update({
+                "担当者名": st.session_state.get("rep_name",""),
+                "見積番号": st.session_state.get("estimate_no",""),
+                "shipping": {
+                    "label": "運賃・梱包",
+                    "option": st.session_state.get("ship_option", "（路線便時間指定不可）"),
+                    "qty": 1,
+                    "unit": "式",
+                    "price": int(st.session_state.get("ship_price", 0)),
+                }
+            })
+
+            out = osp.join(save_dir, f"{st.session_state.file_title}_お見積書（明細）.xlsx")
             tpl = str(TEMPLATE_BOOK) if TEMPLATE_BOOK.exists() else str(APP_DIR / "お見積書（明細）.xlsx")
 
             try:
-                # 新テンプレ（見積書0/1〜5）かどうかを判定
+                # テンプレ判定（見積書0/1〜5 が揃っていれば新ルート）
                 use_new = False
                 if tpl and osp.exists(tpl):
                     try:
                         _wb_check = load_workbook(tpl, data_only=False)
-                        snames = set(_wb_check.sheetnames)
-                        use_new = ("見積書0" in snames) and all(f"見積書{i}" in snames for i in range(1,6))
+                        sn = set(_wb_check.sheetnames)
+                        use_new = ("見積書0" in sn) and all(f"見積書{i}" in sn for i in range(1,6))
                     except Exception:
                         use_new = False
 
                 if use_new:
-                    # 既存レイアウト維持で転記（ヘッダ：見積書0、明細：見積書1〜5）
+                    # 見積書0：間口合計は空行なしで連続記載
+                    # その直後に『運賃・梱包』（数量=1/単位=式/単価=入力値）を追記
                     export_quotation_book_preserve(
                         out, header, overall_items,
                         template_path=tpl,
@@ -902,7 +966,7 @@ with c2:
                         start_row=12, end_row=44,
                     )
                 else:
-                    # 旧テンプレ互換は、関数が存在する時だけ使用
+                    # 旧テンプレ互換（関数がある時のみ）
                     if export_detail_xlsx_preserve is None:
                         raise ImportError(
                             "旧テンプレ互換の export_detail_xlsx_preserve が見つかりません。"
@@ -924,7 +988,7 @@ with c2:
                         key="excel_dl_btn",
                     )
             except ValueError as e:
-                st.error(str(e))   # 例：5ページ超過
+                st.error(str(e))  # 例：5ページ超過
             except Exception as e:
                 st.error("Excel出力でエラーが発生しました。")
                 st.exception(e)
