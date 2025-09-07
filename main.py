@@ -885,9 +885,11 @@ def export_to_detail_xlsx(out_path: str, header: dict, items: list[dict], templa
 # 保存UI（CSVは従来通り残しつつ、Excel出力を追加）
 sec_title("保存")
 with c2:
-st# ==== 運賃・梱包（見積書0にのみ記載／明細には載せない） ====
-.markdown("### 運賃・梱包（見積書0の末尾に記載・明細には載せません）")
+# ==== 運賃・梱包（見積書0の末尾に記載・明細には載せません） ====
+st.markdown("### 運賃・梱包（見積書0の末尾に記載・明細には載せません）")
+
 ship_c1, ship_c2 = st.columns([2, 2])
+
 with ship_c1:
     ship_option = st.radio(
         "配送条件",
@@ -896,16 +898,18 @@ with ship_c1:
         key="ship_option",
         horizontal=False
     )
+
 with ship_c2:
     ship_price = st.number_input(
         "運賃・梱包 金額（円）",
-        min_value=0, step=100,
+        min_value=0,
+        step=100,
         value=int(st.session_state.get("ship_price", 0)),
         key="ship_price"
     )
 
 def _shipping_required(items: list[dict]) -> bool:
-    """S・MAC または エア・セーブMA型が含まれていれば必須"""
+    """S・MAC または エア・セーブ MA 型が含まれていれば必須"""
     import re
     for it in items or []:
         name = str(it.get("品名") or it.get("name") or it.get("product") or "")
