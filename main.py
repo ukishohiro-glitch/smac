@@ -1,20 +1,22 @@
 # -*- coding: utf-8 -*-
 # main.py — 本番対応 完全版（2025-09 修正版）
-# 変更点：
-#  1) Excelテンプレート名を「お見積書（明細）.xlsx」に変更。
-#  2) エア・セーブME型の見積ロジック拡張：電動駆動部（単一選択）＋インテリジェントセンサー等のOP（複数選択）を
-#     「ME型OP」シートから読み込み、固定価格×数量で加算。カテゴリ列が無い場合は品名のキーワードで自動分類。
+# 追加修正:
+#  A) 部材の「＋」ボタンを見出しの左側に配置
+#  B) S・MACカーテンの原価明細をメモとして各間口末尾に自動掲載（サマリ合計へは不加算）
+#  C) Excel結合セルに安全書き込み（write_merged_safe）で J3 等のエラーを解消
+#  D) テンプレ名：「お見積書（明細）.xlsx」
 
 import os, os.path as osp, secrets, math, re, unicodedata
 from datetime import datetime, date
 import pandas as pd
 import streamlit as st
-from openpyxl import Workbook, load_workbook
+from openpyxl import load_workbook
+from openpyxl.utils.cell import coordinate_to_tuple
 from pathlib import Path
 
 # ===== パス =====
 APP_DIR = Path(__file__).parent
-TEMPLATE_BOOK = APP_DIR / "お見積書（明細）.xlsx"    # ← 修正：テンプレファイル名
+TEMPLATE_BOOK = APP_DIR / "お見積書（明細）.xlsx"    # テンプレファイル名
 MASTER_BOOK   = APP_DIR / "master.xlsx"
 
 # ===== ユーティリティ =====
@@ -89,7 +91,7 @@ def load_master():
     df_mb_tbl   = R("MB型単価表")
     df_mc       = R("MC型単価表")
     df_me_curt  = read_xlsx(MASTER_BOOK, "ME型単価表")
-    df_me_motor = read_xlsx(MASTER_BOOK, "ME型OP")  # ← MEの駆動・センサー等
+    df_me_motor = read_xlsx(MASTER_BOOK, "ME型OP")  # MEの駆動・センサー等
     df_op       = R("OP", ["OP名称","金額","方向"])
     df_gap      = R("隙間シート")
     parts_sheets = ["カーテンレール","取手付間仕切ポール","中間ポール","アルミ押えバー","間仕切ネットBOXバー","落し","その他"]
@@ -178,18 +180,12 @@ def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int,
         "sell_total": int(sell_total),
         "note_ops": note_ops,
         "breakdown": {
-            "原反使用量(m)":       round(raw_len_m, 2),
-            "原反幅(mm)":          int(round(gen_width)),
-            "原反単価(円/m)":       int(round(gen_price)),
             "原反材料(1式)":        int(round(raw_one)),
             "裁断賃(1式)":          int(round(cutting_one)),
             "幅繋ぎ(1式)":          int(round(seam_one)),
             "四方折り返し(1式)":    int(round(fourfold_one)),
             "OP加算(1式)":          int(round(op_one)),
             "原価(1式)":            int(round(genka_one)),
-            "販売単価(1式)":        int(sell_one),
-            "販売金額(数量分)":      int(sell_total),
-            "粗利率":               (max(0.0, 1.0 - (genka_total / sell_total)) if sell_total else 0.0),
         }
     })
     return res
@@ -209,8 +205,6 @@ def area_price(df_area: pd.DataFrame, item_name: str, perf: str, W: int, H: int,
     unit_col = pick_price_col(df_area)
     if unit_col is None: res["msg"] = "単価列が見つかりません。"; return res
 
-    rows = df_area[df_area[name_col]==item_name]
-    if perf_col and perf: rows = rows[perf_col]==perf and df_area[df_area[name_col]==item_name]
     rows = df_area[(df_area[name_col]==item_name) & ((df_area[perf_col]==perf) if perf_col and perf else True)]
     if rows.empty: res["msg"] = "対象行が見つかりません。"; return res
 
@@ -226,10 +220,13 @@ def mc_slide_rail_price(W: int, CNT: int) -> int:
     rail_len_mm = int(math.ceil((W*2)/2000.0)*2000)
     return int((rail_len_mm/1000.0)*7400)*CNT
 
+def pick_price_col_fixed(df_fixed: pd.DataFrame):
+    return pick_col(df_fixed, ["固定価格","単価","価格","金額"]) or pick_price_col(df_fixed)
+
 def fixed_price(df_fixed: pd.DataFrame, item_name: str) -> int:
     if df_fixed.empty or not item_name: return 0
     name_col = pick_col(df_fixed, ["品名","製品名","名称"]) or df_fixed.columns[0]
-    price_col = pick_price_col(df_fixed) or pick_col(df_fixed, ["固定価格","単価","価格","金額"])
+    price_col = pick_price_col_fixed(df_fixed)
     if price_col is None: return 0
     row = df_fixed[df_fixed[name_col]==item_name]
     if row.empty: return 0
@@ -244,8 +241,8 @@ def split_me_op(df_me_op: pd.DataFrame):
     cat_col  = pick_col(df_me_op, ["カテゴリ","区分","種別","category"])
     names = df_me_op[name_col].dropna().astype(str).unique().tolist()
 
-    motor_kw = ("駆動","ﾄﾞﾗｲﾌﾞ","モータ","ﾓｰﾀ","電動","駆動部","ドライヴ","ドライブ","アクチュエータ","アクチュエーター")
-    sensor_kw = ("センサー","sensor","ｾﾝｻ","インテリ","intelli","人感","リモコン","remote","コントローラ","制御","制御盤","スイッチ","スイッチング")
+    motor_kw = ("駆動","ﾄﾞﾗｲﾌﾞ","モータ","ﾓｰﾀ","電動","駆動部","アクチュエータ","アクチュエーター")
+    sensor_kw = ("センサー","sensor","ｾﾝｻ","インテリ","intelli","人感","リモコン","remote","コントローラ","制御","制御盤","スイッチ")
 
     motors, accs = [], []
     for nm in names:
@@ -256,16 +253,13 @@ def split_me_op(df_me_op: pd.DataFrame):
                 motors.append(nm); continue
             if any(k in cat for k in ["sensor","センサ","ｾﾝｻ","インテリ","制御","スイッチ","remote"]):
                 accs.append(nm); continue
-        # カテゴリなし→名前で判定
         low = nm.lower()
         if any(k.lower() in low for k in motor_kw):
             motors.append(nm)
         elif any(k.lower() in low for k in sensor_kw):
             accs.append(nm)
         else:
-            # 分類できないものは付属品扱いに回す
             accs.append(nm)
-    # 万一どちらかが0件の場合、全件アクセサリに
     if not motors and names:
         accs = names
     return sorted(set(motors)), sorted(set(accs))
@@ -531,8 +525,8 @@ def render_opening(idx: int):
                                W, H, CNT, df_gen, df_op, picked_ops)
             if sm["ok"]:
                 note = f"W{W}×H{H}mm"
-                if sm["note_ops"]:
-                    note += "／OP：" + "・".join(sm["note_ops"])
+                if sm["note_ops"]: note += "／OP：" + "・".join(sm["note_ops"])
+                # 販売行
                 overall_items.append({
                     "opening": idx,
                     "品名": "S・MACカーテン"
@@ -544,6 +538,14 @@ def render_opening(idx: int):
                     "備考": (f"符号:{mark}／" if mark else "") + note
                 })
                 overall_total_update(sm["sell_total"])
+                # (B) 原価明細をメモとして掲載（集計はしない）
+                bd = sm["breakdown"]
+                bd_text = "S・MAC原価明細：" + " / ".join([f"{k}:{bd[k]:,}円" for k in ["原反材料(1式)","裁断賃(1式)","幅繋ぎ(1式)","四方折り返し(1式)","OP加算(1式)","原価(1式)"] if k in bd])
+                overall_items.append({
+                    "opening": idx,
+                    "品名": "（原価明細）", "数量":"", "単位":"", "単価":"", "小計":0,
+                    "種別":"メモ", "備考": bd_text
+                })
             else:
                 st.warning(sm.get("msg") or "S・MACの計算に失敗しました。")
 
@@ -612,13 +614,10 @@ def render_opening(idx: int):
 
                 # ② ME型OP（駆動部：単一選択／センサー・コントローラ等：複数選択）
                 motors, accs = split_me_op(df_me_motor)
-                op_name_col = pick_col(df_me_motor, ["品名","製品名","名称"]) or (df_me_motor.columns[0] if not df_me_motor.empty else None)
 
-                # 駆動部（セレクトボックス）
                 me_motor_sel = ""
                 if motors:
                     me_motor_sel = st.selectbox("ME：電動駆動部（必須1つ）", [""]+motors, key=pref+"me_motor")
-                # アクセサリ（チェックボックス複数）
                 acc_selected = []
                 if accs:
                     st.caption("ME：インテリジェントセンサー／リモコン／制御ほか（複数選択可）")
@@ -628,7 +627,6 @@ def render_opening(idx: int):
                             if st.checkbox(nm, key=pref+f"me_acc_{i}"):
                                 acc_selected.append(nm)
 
-                # 駆動部の価格
                 if me_motor_sel:
                     mu = fixed_price(df_me_motor, me_motor_sel)
                     if mu>0:
@@ -640,7 +638,6 @@ def render_opening(idx: int):
                         })
                         total_me += mu*CNT
 
-                # アクセサリの価格（合計）
                 if acc_selected:
                     for nm in acc_selected:
                         pv = fixed_price(df_me_motor, nm)
@@ -668,12 +665,13 @@ def render_opening(idx: int):
             if rows_key not in st.session_state:
                 st.session_state[rows_key] = [{"item":"", "qty":1}]
 
-            # 「＋」を各シート名の右横（同一行右端）
-            hcol1, hcol2 = st.columns([0.86, 0.14])
-            with hcol1: st.caption(f"【{sheet_name}】")
-            with hcol2:
+            # (A) 「＋」を見出しの左側へ
+            hcolL, hcolR = st.columns([0.14, 0.86])
+            with hcolL:
                 if st.button("＋", key=pref+f"{sheet_name}_add"):
                     st.session_state[rows_key].append({"item":"", "qty":1}); st.rerun()
+            with hcolR:
+                st.caption(f"【{sheet_name}】")
 
             name_col = pick_col(dfp, ["品名","製品名","名称","品番"]) or (dfp.columns[0] if not dfp.empty else None)
             names = dfp[name_col].dropna().unique().tolist() if name_col else []
@@ -682,7 +680,6 @@ def render_opening(idx: int):
                 st.markdown('<div class="row-compact">', unsafe_allow_html=True)
                 col1, col2, col3, col4, col5 = st.columns([1.4,0.45,0.7,0.8,0.28])
                 with col1:
-                    # ラジオ：選択済みなら「空欄」と「選択中」のみ表示、未選択なら全候補
                     all_item_opts = names
                     current = rowdata["item"] if rowdata["item"] in ([""] + all_item_opts) else ""
                     item_opts = [""] + ([current] if current else all_item_opts)
@@ -789,6 +786,19 @@ def opening_summary(opening_items: list[dict]):
     memo_text = " / ".join(memos) if memos else ""
     return curtain_name or "（カーテン未選択）", total, memo_text
 
+# ===== Excel結合セル 安全書き込みヘルパ =====
+def write_merged_safe(ws, coord: str, value):
+    """結合セル範囲内であっても先頭セルに安全に書き込む"""
+    r, c = coordinate_to_tuple(coord)
+    target = coord
+    for mr in ws.merged_cells.ranges:
+        if (r, c) in mr.cells:
+            # 先頭セルに書く
+            top_left = mr.min_row, mr.min_col
+            target = ws.cell(row=top_left[0], column=top_left[1]).coordinate
+            break
+    ws[target].value = value
+
 # ===== バリデーション =====
 def validate_before_export(items: list[dict], ship_method: str, ship_fee: int):
     errs = []
@@ -826,13 +836,13 @@ def export_to_template(out_path: str, items: list[dict], header: dict, ship_meth
     wb = load_workbook(TEMPLATE_BOOK)
     ws0 = wb["見積書0"]
 
-    # ヘッダー
-    ws0["J1"] = header["estimate_no"]
-    ws0["J3"] = header["date"]
-    ws0["A6"] = header["customer_name"]
-    ws0["A7"] = (f"{header['branch_name']} {header['office_name']}".strip())
-    ws0["A8"] = header["person_name"]
-    ws0["B17"] = header["project_name"]
+    # ヘッダー（C: 結合セルでもOKな安全書き込み）
+    write_merged_safe(ws0, "J1", header["estimate_no"])
+    write_merged_safe(ws0, "J3", header["date"])             # ← ここが以前エラーになっていた想定
+    write_merged_safe(ws0, "A6", header["customer_name"])
+    write_merged_safe(ws0, "A7", (f"{header['branch_name']} {header['office_name']}".strip()))
+    write_merged_safe(ws0, "A8", header["person_name"])
+    write_merged_safe(ws0, "B17", header["project_name"])
 
     # 見積書0：21〜 に間口合計（A/F/G/H）→ 末尾に運賃梱包（空行なし）
     row = 21
@@ -863,12 +873,12 @@ def export_to_template(out_path: str, items: list[dict], header: dict, ship_meth
             lines.append((it.get("品名",""), it.get("数量",""), it.get("単位",""), it.get("単価","")))
         memo_text = opening_memos.get(grp[0].get("opening"), "")
         if memo_text:
+            # メモは1行にまとめてA列へ
             lines.append((memo_text, "", "", ""))
         return lines
 
     all_opening_lines = [lines_for_opening(grp) for grp in opening_groups]
 
-    # ページレイアウト
     PAGES = [wb[f"見積書{i}"] for i in range(1,6)]
     page_idx = 0
     row_in_page = 12
@@ -877,17 +887,12 @@ def export_to_template(out_path: str, items: list[dict], header: dict, ship_meth
         page_idx += 1
         row_in_page = 12
 
-    page_idx = 0
-    row_in_page = 12
-
     for op_lines in all_opening_lines:
         block_len = len(op_lines)
         if block_len == 0:
             continue
-        # 1間口≤33 はページ跨ぎ禁止：残り行不足なら新ページへ
         if block_len <= 33 and (row_in_page + block_len - 1) > 44:
             new_page()
-        # 1間口>33 は跨ぎ可：溢れたら次ページ
         while op_lines:
             if page_idx >= len(PAGES):
                 raise RuntimeError("明細ページが5ページを超えました。")
