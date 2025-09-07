@@ -883,8 +883,8 @@ def export_to_detail_xlsx(out_path: str, header: dict, items: list[dict], templa
 # 保存UI（CSVは従来通り残しつつ、Excel出力を追加）
 sec_title("保存")
 with c2:
-　　# ==== 運賃・梱包（見積書0にのみ記載／明細には載せない） ====
-st.markdown("### 運賃・梱包（見積書0の末尾に記載・明細には載せません）")
+st# ==== 運賃・梱包（見積書0にのみ記載／明細には載せない） ====
+.markdown("### 運賃・梱包（見積書0の末尾に記載・明細には載せません）")
 ship_c1, ship_c2 = st.columns([2, 2])
 with ship_c1:
     ship_option = st.radio(
