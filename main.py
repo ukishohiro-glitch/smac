@@ -891,6 +891,7 @@ st.markdown("### 運賃・梱包（見積書0の末尾に記載・明細には�
 ship_c1, ship_c2 = st.columns([2, 2])
 
 with ship_c1:
+    # ← with の直後は必ずインデントされた処理行にする
     ship_option = st.radio(
         "配送条件",
         options=["（路線便時間指定不可）", "（現場搬入時間指定可）"],
@@ -919,7 +920,6 @@ def _shipping_required(items: list[dict]) -> bool:
             return True
     return False
 
-    st.markdown("**Excel保存（お見積書（明細））**")
     
 # （←この行は説明なので貼らなくてOK）保存セクション：この塊だけを使います
 sc1, sc2 = st.columns([1, 2])
