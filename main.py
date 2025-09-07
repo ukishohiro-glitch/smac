@@ -31,7 +31,7 @@ except Exception:
         export_quotation_book_preserve = getattr(_mod, "export_quotation_book_preserve", None)
         export_detail_xlsx_preserve    = getattr(_mod, "export_detail_xlsx_preserve", None)
     else:
-        # 代表的なサブフォルダも探索（必要なら追記してください）
+        # サブフォルダ等も探索
         for cand in [APP_DIR / "modules" / "excel_export.py", Path.cwd() / "excel_export.py"]:
             if cand.exists():
                 _mod = _load_excel_export_from_path(cand)
