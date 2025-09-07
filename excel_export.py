@@ -177,8 +177,9 @@ def export_detail_xlsx_preserve(out_path, header, overall_items, *, template_pat
         teikeiku = list(op.get("teikeiku", []))
         need = len(items) + len(teikeiku)
 
-        # 33行以内の間口はページ跨ぎ禁止
-        while (row - (start_row + page * rows_per_page)) + need > rows_per_page and need <= rows_per_page:
+        # 33行以内の間口はページ跨ぎ禁止（丸ごと次ページへ送る）
+        cur_used = (row - (start_row + page * rows_per_page))
+        if need <= rows_per_page and cur_used + need > rows_per_page:
             ensure_next_page()
 
         for it in items:
