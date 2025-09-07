@@ -11,6 +11,7 @@ import os, os.path as osp, secrets, math, re, unicodedata
 from datetime import datetime, date
 import pandas as pd
 import streamlit as st
+
 # --- safe import of excel_export ---
 import importlib.util, sys
 from openpyxl import Workbook, load_workbook  # 既存でOK
@@ -22,7 +23,8 @@ def _load_excel_export_from_path(mod_path):
     return mod
 
 try:
-    # 通常の import に成功するならそのまま使う
+    # 通常の import に成功するならそのまま使う（←ここが必須。空にしない）
+    from excel_export import export_quotation_book_preserve, export_detail_xlsx_preserve
 except Exception:
     # 同ディレクトリの excel_export.py を直接ロード
     mod_file = (APP_DIR / "excel_export.py")
