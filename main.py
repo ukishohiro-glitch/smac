@@ -1,366 +1,29 @@
+# main.py - 完全版（全文書き換え / UI含むフル実装）
+
+import os
+import os.path as osp
+import secrets
+import re
 from pathlib import Path
+from datetime import datetime, date
+
+import streamlit as st
+from openpyxl import load_workbook
+
+# ===== パス定義（__file__ 非対応環境でも安全） =====
 try:
     APP_DIR = Path(__file__).parent
 except NameError:
     APP_DIR = Path.cwd()
 TEMPLATE_BOOK = APP_DIR / "お見積書（明細）.xlsx"
 MASTER_BOOK   = APP_DIR / "master.xlsx"
-# -*- coding: utf-8 -*-
-# main.py — ①大分類ラジオ ②片引き/引分けラジオ ③部材品名ラジオ ④定型文チェック ⑤Excel出力(お見積書(明細)) 対応版
-import os, os.path as osp, secrets, math, re, unicodedata
-from datetime import datetime, date
-import pandas as pd
-import streamlit as st
 
-# --- safe import of excel_export ---
-import importlib.util, sys
-from openpyxl import Workbook, load_workbook  # 既存でOK
-
-def _load_excel_export_from_path(mod_path):
-    spec = importlib.util.spec_from_file_location("excel_export", str(mod_path))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-try:
-    # 通常の import に成功するならそのまま使う（←ここが必須。空にしない）
-    from excel_export import export_quotation_book_preserve, export_detail_xlsx_preserve
-except Exception:
-    # 同ディレクトリの excel_export.py を直接ロード
-    mod_file = (APP_DIR / "excel_export.py")
-    if mod_file.exists():
-        _mod = _load_excel_export_from_path(mod_file)
-        export_quotation_book_preserve = getattr(_mod, "export_quotation_book_preserve", None)
-        export_detail_xlsx_preserve    = getattr(_mod, "export_detail_xlsx_preserve", None)
-    else:
-        # サブフォルダ等も探索
-        for cand in [APP_DIR / "modules" / "excel_export.py", Path.cwd() / "excel_export.py"]:
-            if cand.exists():
-                _mod = _load_excel_export_from_path(cand)
-                export_quotation_book_preserve = getattr(_mod, "export_quotation_book_preserve", None)
-                export_detail_xlsx_preserve    = getattr(_mod, "export_detail_xlsx_preserve", None)
-                break
-        else:
-            raise ImportError(
-                "excel_export.py が見つかりません。main.py と同じフォルダに置くか、探索パスを調整してください。"
-            )
+# ===== Excel エクスポート（直 import に統一） =====
+from excel_export import export_quotation_book_preserve, export_detail_xlsx_preserve
 
 
-from openpyxl import Workbook, load_workbook
-
-# ===== ユーティリティ =====
-def normalize_string(s):
-    if isinstance(s, str):
-        s = s.replace("\u3000", " ")
-        s = unicodedata.normalize("NFKC", s)
-        s = re.sub(r"\s+", " ", s.strip())
-    return s
-
-def norm_cols(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty: return pd.DataFrame()
-    df = df.copy()
-    df.columns = [normalize_string(c) for c in df.columns]
-    for c in df.columns:
-        if df[c].dtype == object:
-            df[c] = df[c].map(normalize_string)
-    return df
-
-NUM_RE = re.compile(r"[-+]?\d[\d,]*\.?\d*")
-def parse_float(x):
-    if x is None: return None
-    m = NUM_RE.search(str(x))
-    if not m: return None
-    try: return float(m.group(0).replace(",", ""))
-    except: return None
-
-def parse_length_mm(x):
-    if x is None: return None
-    s = normalize_string(str(x)).lower()
-    m_m = re.search(r"(\d[\d,]*\.?\d*)\s*m(?!m)", s)
-    if m_m:
-        return int(math.ceil(float(m_m.group(1).replace(",", ""))*1000))
-    v = parse_float(s)
-    if v is None: return None
-    if "mm" in s: return int(round(v))
-    return int(round(v if v>=1000 else v*1000))
-
-def ceil100(x: float) -> int: return int(math.ceil(x/100.0)*100)
-
-def pick_col(df: pd.DataFrame, candidates) -> str | None:
-    for c in candidates:
-        if c in df.columns: return c
-    norm = {normalize_string(c): c for c in df.columns}
-    for c in candidates:
-        if c in norm: return norm[c]
-    return None
-
-def read_xlsx(path: str, sheet: str | None = None) -> pd.DataFrame:
-    try:
-        df = pd.read_excel(path, sheet_name=sheet) if sheet else pd.read_excel(path)
-        return norm_cols(df)
-    except Exception:
-        return pd.DataFrame()
-
-# ===== マスタ読込 =====
-def load_master():
-    xls = "master.xlsx"
-    def R(sn, add_cols=None):
-        try:
-            df = pd.read_excel(xls, sheet_name=sn); df = norm_cols(df)
-            if add_cols:
-                for c in add_cols:
-                    if c not in df.columns: df[c] = ""
-            return df
-        except Exception: return pd.DataFrame()
-
-    df_clients  = R("得意先一覧")
-    df_curtain  = R("カーテン", ["大分類","中分類","小分類"])
-    df_perf     = R("カーテン性能", ["中分類","性能"])
-    df_ma       = R("MA型単価表")
-    df_mb_tbl   = R("MB型単価表")
-    df_mc       = R("MC型単価表")
-    df_me_curt  = read_xlsx(xls, "ME型単価表")
-    df_me_motor = read_xlsx(xls, "ME型OP")
-    df_op       = R("OP", ["OP名称","金額","方向"])
-    df_gap      = R("隙間シート")
-    parts_sheets = ["カーテンレール","取手付間仕切ポール","中間ポール","アルミ押えバー","間仕切ネットBOXバー","落し","その他"]
-    df_parts = {sn: R(sn) for sn in parts_sheets}
-    df_gen = read_xlsx("原反価格表.xlsx")
-    if df_gen.empty: df_gen = R("原反価格")
-    return (df_clients, df_curtain, df_perf,
-            df_ma, df_mb_tbl, df_mc, df_me_curt, df_me_motor,
-            df_op, df_gap, df_parts, df_gen)
-
-# ===== S・MAC計算（原価内訳を返す版） =====
-def extract_thickness(text: str) -> float | None:
-    m = re.search(r"(\d+(?:\.\d+)?)\s*t", str(text or "")); 
-    if m:
-        try: return float(m.group(1))
-        except: return None
-    return None
-
-def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int,
-                  df_gen: pd.DataFrame, df_op: pd.DataFrame, picked_ops: list[dict]):
-    """戻り値: dict(ok, sell_one, sell_total, note_ops, breakdown)
-       breakdown は 1間口あたりの内訳＋補足情報を含みます。"""
-    # --- 調整しやすい単価（必要ならここを変えてください） ---
-    HEM_UNIT_THIN = 450     # 四方折り返し（0.3t以下）
-    HEM_UNIT_THICK = 550    # 四方折り返し（0.3t超）
-    SEAM_UNIT_PER_M = 300   # 幅繋ぎ：1本あたり1m単価（縦方向の継ぎ）
-
-    res = {"ok": False, "msg": "", "sell_one": 0, "sell_total": 0, "note_ops": [], "breakdown": {}}
-    if not middle_name or W<=0 or H<=0 or cnt<=0 or df_gen.empty:
-        res["msg"] = "S・MAC：中分類/寸法/数量/原反価格を確認してください。"
-        return res
-
-    name_col = pick_col(df_gen, ["製品名","品名","名称"]) or df_gen.columns[0]
-    w_col    = pick_col(df_gen, ["原反幅(mm)","原反幅","幅","巾"]) or df_gen.columns[1]
-    u_col    = pick_col(df_gen, ["単価","上代","価格","金額"]) or df_gen.columns[2]
-    t_col    = pick_col(df_gen, ["厚み","厚さ","t"])
-
-    hit = df_gen[df_gen[name_col]==middle_name]
-    if hit.empty:
-        hit = df_gen[df_gen[name_col].astype(str).str.contains(re.escape(middle_name), na=False)]
-    if hit.empty:
-        res["msg"] = f"S・MAC：原反価格に『{middle_name}』が見つかりません。"
-        return res
-
-    gen_width = parse_float(hit.iloc[0][w_col])
-    gen_price = parse_float(hit.iloc[0][u_col])
-    thick = extract_thickness(hit.iloc[0][t_col]) if t_col else extract_thickness(hit.iloc[0][name_col])
-    if not gen_width or not gen_price:
-        res["msg"] = "S・MAC：原反幅または単価が不正です。"
-        return res
-
-    # 寸法補正（片引き=1枚、引分け=2枚）
-    if open_method == "片引き":
-        cur_w = W * 1.05; panels = 1
-    else:
-        cur_w = (W/2) * 1.05; panels = 2
-    cur_h = H + 50
-
-    # 原反使用量（1間口）
-    length_per_panel_m = (cur_h * 1.2) / 1000.0         # ふところ含む仮係数
-    joints = math.ceil(cur_w / gen_width)               # 1パネル内の原反継ぎ本数
-    raw_len_m = length_per_panel_m * joints * panels    # ★原反使用量[m]（1間口あたり）
-    raw_one = gen_price * raw_len_m                      # 原反材料（1式）
-
-    # 裁断賃（旧カット工賃）
-    cutting_one = (2000 if joints <= 3 else 3000) * panels
-
-    # 幅繋ぎ：縦継ぎ（継ぎ本数×高さ×単価）
-    seams_total = max(0, joints - 1) * panels
-    seam_one = math.ceil(cur_h/1000.0) * SEAM_UNIT_PER_M * seams_total
-
-    # 四方折り返し：周長[m]×単価
-    hem_unit = HEM_UNIT_THIN if (thick is not None and thick <= 0.3) else HEM_UNIT_THICK
-    hem_perimeter_m = (cur_w + cur_w + cur_h + cur_h) / 1000.0
-    fourfold_one = math.ceil(hem_perimeter_m) * hem_unit * panels
-
-    # OP（方向：W/横/X=幅基準、それ以外=高さ基準）— 1式に均等化
-    note_ops, op_total = [], 0
-    for op in (picked_ops or []):
-        name = normalize_string(op.get("OP名称","")); unit = int(parse_float(op.get("金額")) or 0)
-        dire = normalize_string(op.get("方向","")).upper()
-        if not name or unit<=0: continue
-        base_mm = cur_w if dire in ["W","横","X"] else cur_h
-        units_1000 = math.ceil(base_mm/1000.0)
-        sub = units_1000 * unit * panels * cnt
-        op_total += sub; note_ops.append(name)
-    op_one = op_total / cnt if cnt else 0
-
-    # 原価→売価
-    genka_one   = raw_one + cutting_one + seam_one + fourfold_one + op_one
-    genka_total = raw_one*cnt + cutting_one*cnt + seam_one*cnt + fourfold_one*cnt + op_total
-    sell_one    = ceil100(genka_one / 0.6)              # 粗利40%想定
-    sell_total  = ceil100(genka_total / 0.6)
-
-    res.update({
-        "ok": True,
-        "sell_one": int(sell_one),
-        "sell_total": int(sell_total),
-        "note_ops": note_ops,
-        "breakdown": {
-            # 補足情報
-            "原反使用量(m)":       round(raw_len_m, 2),
-            "原反幅(mm)":          int(round(gen_width)),
-            "原反単価(円/m)":       int(round(gen_price)),
-            # 金額内訳（1式＝1間口）
-            "原反材料(1式)":        int(round(raw_one)),
-            "裁断賃(1式)":          int(round(cutting_one)),
-            "幅繋ぎ(1式)":          int(round(seam_one)),
-            "四方折り返し(1式)":    int(round(fourfold_one)),
-            "OP加算(1式)":          int(round(op_one)),
-            "原価(1式)":            int(round(genka_one)),
-            # 参考
-            "販売単価(1式)":        int(sell_one),
-            "販売金額(数量分)":      int(sell_total),
-            "粗利率":               (max(0.0, 1.0 - (genka_total / sell_total)) if sell_total else 0.0),
-        }
-    })
-    return res
-
-# ===== エア・セーブ簡易 =====
-def pick_price_col(df: pd.DataFrame):
-    for c in ["㎡単価","平米単価","m2単価","単価","上代","価格","金額"]:
-        if c in df.columns: return c
-    return None
-
-def area_price(df_area: pd.DataFrame, item_name: str, perf: str, W: int, H: int, CNT: int):
-    res = {"ok": False, "msg": "", "unit":0, "price_one":0, "total":0}
-    if df_area.empty or not item_name or W<=0 or H<=0 or CNT<=0:
-        res["msg"] = "単価表・品名・寸法・数量を確認してください。"; return res
-    name_col = pick_col(df_area, ["品名","製品名","名称","品番","型式"]) or df_area.columns[0]
-    perf_col = pick_col(df_area, ["性能","特性"])
-    unit_col = pick_price_col(df_area)
-    if unit_col is None: res["msg"] = "単価列が見つかりません。"; return res
-
-    rows = df_area[df_area[name_col]==item_name]
-    if perf_col and perf: rows = rows[rows[perf_col]==perf]
-    if rows.empty: res["msg"] = "対象行が見つかりません。"; return res
-
-    unit = parse_float(rows.iloc[0][unit_col])
-    if not unit: res["msg"] = "単価が数値化できません。"; return res
-
-    area = (W/1000)*(H/1000)
-    price_one = ceil100(area*unit); total = int(price_one*CNT)
-    res.update({"ok":True, "unit": int(round(unit)), "price_one": int(price_one), "total": int(total)})
-    return res
-
-def mc_slide_rail_price(W: int, CNT: int) -> int:
-    rail_len_mm = int(math.ceil((W*2)/2000.0)*2000)
-    return int((rail_len_mm/1000.0)*7400)*CNT
-
-def fixed_price(df_fixed: pd.DataFrame, item_name: str) -> int:
-    if df_fixed.empty or not item_name: return 0
-    name_col = pick_col(df_fixed, ["品名","製品名","名称"]) or df_fixed.columns[0]
-    price_col = pick_price_col(df_fixed) or pick_col(df_fixed, ["固定価格","単価","価格","金額"])
-    if price_col is None: return 0
-    row = df_fixed[df_fixed[name_col]==item_name]
-    if row.empty: return 0
-    v = parse_float(row.iloc[0][price_col])
-    return int(ceil100(v)) if v else 0
-
-# ===== 部材ヘルパ =====
-PART_LENGTH_RULE = {
-    "カーテンレール": "width",
-    "取手付間仕切ポール": "height",
-    "中間ポール": "height",
-    "アルミ押えバー": "height",
-    "間仕切ネットBOXバー": "height",
-}
-REQ_COLS_MAP = {
-    "品名": ["品名","製品名","名称","品番"],
-    "m単価": ["m単価","/m","1m単価","１m単価","m当たり","mあたり"],
-    "セット長(mm)": ["セット長(mm)","セット長","定尺","規格長","サイズ","寸法","長さ","長さ(mm)"],
-    "セット価格": ["セット価格","セット金額"],
-    "固定価格": ["固定価格","単価","価格","金額","上代"],
-}
-def get_length_columns(df: pd.DataFrame) -> list[int]:
-    lens = []
-    for c in df.columns:
-        try:
-            v = int(str(c).replace(",", ""))
-            if v>=1000: lens.append(v)
-        except: pass
-    return sorted(set(lens))
-
-def pick_len_col(length_cols: list[int], need_mm: int) -> int | None:
-    if not length_cols: return None
-    for L in length_cols:
-        if L>=need_mm: return L
-    return length_cols[-1]
-
-def map_required_cols(df: pd.DataFrame) -> dict:
-    mp = {}
-    for formal, cands in REQ_COLS_MAP.items():
-        col = pick_col(df, cands)
-        if col: mp[formal] = col
-    return mp
-
-def price_part_row(part_name: str, row: pd.Series, W: int, H: int, df_sheet: pd.DataFrame) -> tuple[int, str, float]:
-    length_cols = get_length_columns(df_sheet)
-    if length_cols:
-        basis = 0
-        if PART_LENGTH_RULE.get(part_name)=="width" and W>0:  basis=int(W)
-        elif PART_LENGTH_RULE.get(part_name)=="height" and H>0: basis=int(H)
-        if basis>0:
-            col_mm = pick_len_col(length_cols, basis)
-            if col_mm is not None:
-                price_cell = row.get(col_mm) if col_mm in row else row.get(str(col_mm))
-                price_raw = parse_float(price_cell)
-                if price_raw and price_raw>0:
-                    unit = ceil100(price_raw*0.5)
-                    label = f"{int(col_mm/1000)}m相当"
-                    return int(unit), label, float(col_mm)/1000.0
-    mp = map_required_cols(pd.DataFrame([row]))
-    if "m単価" in mp:
-        per_m = parse_float(row[mp["m単価"]])
-        if per_m and per_m>0:
-            if PART_LENGTH_RULE.get(part_name)=="width" and W>0:
-                mcount = math.ceil(W/1000.0)
-            elif PART_LENGTH_RULE.get(part_name)=="height" and H>0:
-                mcount = math.ceil((H/1000.0)*2)/2
-            else: mcount = 0
-            unit = int(ceil100(per_m*0.5) * (mcount if mcount else 0))
-            label = f"{mcount:g}m分" if mcount else ""
-            return unit, label, float(mcount or 0)
-    if "セット長(mm)" in mp and "セット価格" in mp:
-        L = parse_length_mm(row[mp["セット長(mm)"]]); P = parse_float(row[mp["セット価格"]])
-        if L and L>=1000 and P and P>0:
-            unit = ceil100(P*0.5); label=f"{int(L/1000)}mセット"
-            return int(unit), label, float(L)/1000.0
-    if "固定価格" in mp:
-        P = parse_float(row[mp["固定価格"]])
-        if P and P>0: return int(ceil100(P*0.5)), "", 0.0
-    return 0, "", 0.0
-
-# ==== 見積番号 & 担当者名（ヘッダー） ====
-import secrets, re
-from datetime import datetime
-
-def _next_estimate_no():
-    # 37期=37 / 9月=09 固定 → 3709-xxxxx（xxxxxは重複しない5桁ランダム）
+# ===== 見積番号：3709-xxxxx を一度だけ採番 =====
+def _next_estimate_no() -> str:
     prefix = "3709-"
     used = st.session_state.setdefault("used_estnos", set())
     for _ in range(1000):
@@ -369,549 +32,11 @@ def _next_estimate_no():
         if eno not in used:
             used.add(eno)
             return eno
-    # 念のため（衝突し続けたら時間で逃がす）
     return prefix + datetime.now().strftime("%H%M%S")[-5:]
 
-hc1, hc2, hc3 = st.columns([2, 1, 1])
-with hc1:
-    rep_name = st.text_input("担当者名（半角英数2〜4）", value=st.session_state.get("rep_name",""), key="rep_name")
-    if rep_name and not re.fullmatch(r"[A-Za-z0-9]{2,4}", rep_name):
-        st.error("担当者名は半角英数字2〜4文字で入力してください。")
-with hc2:
-    if "estimate_no" not in st.session_state:
-        st.session_state.estimate_no = _next_estimate_no()
-    st.text_input("見積番号", st.session_state.estimate_no, key="estimate_no", disabled=True)
-with hc3:
-    st.write("")  # 余白（以前ここにボタンがあった場合の跡地）
 
-
-# ===== 画面セットアップ =====
-st.set_page_config(layout="wide", page_title="お見積書作成システム")
-
-# CSS少し詰め
-st.markdown("""
-<style>
-section.main > div.block-container { padding-top: 8px; padding-bottom: 10px; padding-left: 10px; padding-right: 10px; }
-div[data-testid="stHorizontalBlock"] { gap: 8px !important; }
-div[data-testid="column"] { padding-left: 6px; padding-right: 6px; }
-.sec-h { font-size:16pt; font-weight:400; margin: 6px 0 4px; }
-.row-compact { display: grid; grid-template-columns: 1.4fr 0.45fr 0.7fr 0.8fr 0.28fr; column-gap: 8px; align-items: end; }
-.sticky-wrap { position: sticky; top: 0; z-index: 999; background: var(--background-color); padding: 6px 6px 8px; border-bottom: 1px solid rgba(128,128,128,.35); }
-.hr-thin { border-top: 1px solid rgba(128,128,128,.35); margin: 6px 0 10px; }
-</style>
-""", unsafe_allow_html=True)
-def sec_title(text: str): st.markdown(f'<div class="sec-h">{text}</div>', unsafe_allow_html=True)
-
-# マスタ
-(df_clients, df_curtain, df_perf,
- df_ma, df_mb_tbl, df_mc, df_me_curt, df_me_motor,
- df_op, df_gap, df_parts, df_gen) = load_master()
-
-# セッション
-today = date.today()
-if "seen_serials" not in st.session_state: st.session_state.seen_serials = set()
-if "user_code" not in st.session_state:   st.session_state.user_code = "UC"
-if "estimate_no" not in st.session_state: st.session_state.estimate_no = generate_estimate_no(st.session_state.user_code, today, st.session_state.seen_serials)
-if "openings" not in st.session_state:    st.session_state.openings = [{"id":1}]
-if "file_title_manual" not in st.session_state: st.session_state.file_title_manual = False
-if "file_title" not in st.session_state:        st.session_state.file_title = datetime.today().strftime("%m%d")
-
-# 定型文（④）
-PHRASES = [
-    "金具：スチール", "金具：ステンレス",
-    "戸先側：取手付間仕切りポール", "戸尻側：フラットバー固定", "戸尻側：取手付間仕切りポール", "戸尻側：吊下げ固定",
-    "※ シートは収縮を考慮し長めでの出荷となります。現場で裾カット調整してください。",
-    "※ カーテン下端は長めでの出荷となります。現場で裾カット調整してください。",
-    "※ 下地別途。取付用のビス等は別途。", 
-    "※ カーテンと間仕切りポール・中間ポールは組込済みです。取手・落し・マグネットは現場で取り付けてください。",
-]
-
-# ===== ヘッダ =====
-st.markdown('<div class="sticky-wrap">', unsafe_allow_html=True)
-sec_title("お見積書作成システム")
-c1, c2, c3 = st.columns([0.9, 1.2, 0.6])
-with c1: st.text_input("担当者コード", value=st.session_state.user_code, key="user_code")
-with c2:
-    st.markdown("**Excel保存（お見積書（明細））**")
-    if st.button("Excel保存（お見積書（明細））", key="excel_save_btn"):
-        if not overall_items:
-            st.error("明細がありません。")
-        else:
-            header = header_dict()
-            out = osp.join(save_dir, f"{st.session_state.file_title}_お見積書（明細）.xlsx")
-
-            # テンプレ探索（__file__が無い環境でもAPP_DIR/TEMPLATE_BOOKで安全）
-            tpl = str(TEMPLATE_BOOK) if TEMPLATE_BOOK.exists() else str(APP_DIR / "お見積書（明細）.xlsx")
-
-            try:
-                # 新テンプレ（見積書0/1〜5）かどうかを判定
-                use_new = False
-                if tpl and osp.exists(tpl):
-                    try:
-                        _wb_check = load_workbook(tpl, data_only=False)
-                        snames = set(_wb_check.sheetnames)
-                        use_new = ("見積書0" in snames) and all(f"見積書{i}" in snames for i in range(1,6))
-                    except Exception:
-                        use_new = False
-
-                if use_new:
-                    # 既存レイアウト維持で転記（ヘッダ：見積書0、明細：見積書1〜5）
-                    export_quotation_book_preserve(
-                        out, header, overall_items,
-                        template_path=tpl,
-                        header_sheet="見積書0",
-                        detail_sheets=[f"見積書{i}" for i in range(1,6)],
-                        start_row=12, end_row=44,
-                    )
-                else:
-                    # 旧テンプレ互換は、関数が存在する時だけ使用
-                    if export_detail_xlsx_preserve is None:
-                        raise ImportError(
-                            "旧テンプレ互換の export_detail_xlsx_preserve が見つかりません。"
-                            "テンプレートに『見積書0』『見積書1〜5』があるファイルをご用意ください。"
-                        )
-                    export_detail_xlsx_preserve(
-                        out, header, overall_items,
-                        template_path=tpl if (tpl and osp.exists(tpl)) else None,
-                        ws_name="お見積書（明細）",
-                        start_row=12, max_rows=33,
-                    )
-
-                st.success(f"Excelを保存しました：{out}")
-                with open(out, "rb") as f:
-                    st.download_button(
-                        "ダウンロード", f.read(),
-                        file_name=os.path.basename(out),
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="excel_dl_btn",  # ← downloadボタンのkeyも1つだけ
-                    )
-            except ValueError as e:
-                st.error(str(e))          # 例：5ページ超過
-            except Exception as e:
-                st.error("Excel出力でエラーが発生しました。")
-                st.exception(e)
-
-with c3:
-    if st.button("見積番号を再生成", key="regen_no"):
-        st.session_state.estimate_no = generate_estimate_no(st.session_state.user_code, today, st.session_state.seen_serials)
-        st.rerun()
-
-d1,d2,d3,d4 = st.columns([1.1,1.1,1.1,1.1])
-clients = df_clients["社名"].dropna().unique().tolist() if "社名" in df_clients.columns else []
-with d1:
-    sel_client = st.selectbox("得意先名", [""]+clients, key="client")
-with d2:
-    branches = df_clients[df_clients["社名"]==sel_client]["支店名"].dropna().unique().tolist() if sel_client and "支店名" in df_clients.columns else []
-    sel_branch = st.selectbox("支店名", [""]+branches, key="branch")
-with d3:
-    offices = df_clients[(df_clients["社名"]==sel_client)&(df_clients["支店名"]==sel_branch)]["営業所名"].dropna().unique().tolist() if sel_client and sel_branch and "営業所名" in df_clients.columns else []
-    sel_office = st.selectbox("営業所名", [""]+offices, key="office")
-with d4:
-    contact = st.text_input("担当者名", key="pic")
-e1,e2 = st.columns([2.6,0.6])
-with e1:
-    pj_name = st.text_input("物件名", key="pj")
-    if not st.session_state.file_title_manual:
-        st.session_state.file_title = f"{datetime.today().strftime('%m%d')}{pj_name}" if pj_name else datetime.today().strftime('%m%d')
-with e2:
-    st.text_input("作成日", value=today.strftime("%Y/%m/%d"), key="created_disp", disabled=True)
-st.markdown('<div class="hr-thin"></div>', unsafe_allow_html=True)
-st.markdown("</div>", unsafe_allow_html=True)
-
-# 合計サマリ
-overall_total = 0
-overall_items = []
-def overall_total_update(v): 
-    global overall_total
-    overall_total += int(v or 0)
-
-# ===== 間口 =====
-def render_opening(idx: int):
-    pref = f"o{idx}_"
-
-    # 行A：基本寸法
-    a1,a2,a3,a4 = st.columns([0.7,1.0,1.0,0.7])
-    with a1: mark = st.text_input("符号", key=pref+"mark")
-    with a2: W = st.number_input("間口W (mm)", min_value=0, value=0, step=50, key=pref+"w")
-    with a3: H = st.number_input("間口H (mm)", min_value=0, value=0, step=50, key=pref+"h")
-    with a4: CNT = st.number_input("数量", min_value=1, value=1, step=1, key=pref+"cnt")
-
-    sec_title("カーテン入力")
-
-    # 行B：①大分類ラジオ／中分類・小分類 or エア・セーブ型式
-    b1,b2,b3 = st.columns([1.0,1.0,1.0])
-    with b1:
-        large_list = []
-        if "大分類" in df_curtain.columns:
-            large_list = [x for x in df_curtain["大分類"].dropna().unique().tolist() if x]
-        if "エア・セーブ" not in large_list:
-            large_list.append("エア・セーブ")
-        large = st.radio("カーテン大分類", [""]+large_list, key=pref+"large", horizontal=True)
-
-    air_type = None
-    middle = small = perf = ""
-    rib_note = ""
-
-    with b2:
-        if large and large != "エア・セーブ":
-            mids = df_curtain[df_curtain["大分類"]==large]["中分類"].dropna().unique().tolist() if "中分類" in df_curtain.columns else []
-            middle = st.selectbox("カーテン中分類", [""]+mids, key=pref+"mid")
-
-    with b3:
-        if large == "エア・セーブ":
-            air_label = st.radio("型式（MA・MB・MC・ME）", ["","MA型折りたたみ式","MB型固定式","MC型スライド式","ME型電動式"], key=pref+"airtype", horizontal=True)
-            air_type = air_label[:2] if air_label else None
-        else:
-            if middle:
-                small_opts = df_curtain[(df_curtain["大分類"]==large)&(df_curtain["中分類"]==middle)]["小分類"].dropna().unique().tolist() if "小分類" in df_curtain.columns else []
-                small = st.selectbox("カーテン小分類", [""]+small_opts, key=pref+"small")
-
-    # 行C：②片引き/引分けラジオ + リブ有無 + 性能など
-    c1,c2,c3,c4 = st.columns([0.8,0.8,1.2,1.0])
-    with c1:
-        if large in ["S・MACカーテン"] or (large=="エア・セーブ" and air_type in ["MC","ME"]):
-            open_mtd = st.radio("片引き/引分け", ["","片引き","引分け"], key=pref+"open", horizontal=True)
-        else:
-            open_mtd = ""
-
-    with c2:
-        if large=="エア・セーブ" and air_type in ["MB","MC","ME"]:
-            rib_note = st.radio("リブ付き/リブ無し", ["","リブ付き","リブ無し"], key=pref+"rib", horizontal=True)
-
-    with c3:
-        air_item = ""
-        if large=="エア・セーブ" and air_type:
-            if air_type=="MA":
-                name_col = pick_col(df_ma, ["品名","製品名","名称","品番","型式"]) or (df_ma.columns[0] if not df_ma.empty else None)
-                items = df_ma[name_col].dropna().unique().tolist() if name_col else []
-                air_item = st.selectbox("エア・セーブ品名", [""]+items, key=pref+"ma_item")
-            elif air_type=="MB":
-                name_col = pick_col(df_mb_tbl, ["品名","製品名","名称","品番","型式"]) or (df_mb_tbl.columns[0] if not df_mb_tbl.empty else None)
-                items = df_mb_tbl[name_col].dropna().unique().tolist() if name_col else []
-                air_item = st.selectbox("エア・セーブ品名", [""]+items, key=pref+"mb_item")
-            elif air_type=="MC":
-                name_col = pick_col(df_mc, ["品名","製品名","名称","品番","型式"]) or (df_mc.columns[0] if not df_mc.empty else None)
-                items = df_mc[name_col].dropna().unique().tolist() if name_col else []
-                air_item = st.selectbox("エア・セーブ品名", [""]+items, key=pref+"mc_item")
-            elif air_type=="ME":
-                curt_df = df_me_curt.copy() if not df_me_curt.empty else df_mc.copy()
-                curt_name_col = pick_col(curt_df, ["品名","製品名","名称","品番","型式"]) or (curt_df.columns[0] if not curt_df.empty else None)
-                items = curt_df[curt_name_col].dropna().unique().tolist() if curt_name_col else []
-                air_item = st.selectbox("エア・セーブ品名（カーテン）", [""]+items, key=pref+"me_curt")
-
-    with c4:
-        if large=="エア・セーブ":
-            perf_all = df_perf["性能"].dropna().unique().tolist() if "性能" in df_perf.columns else []
-            perf = st.selectbox("カーテン性能", [""]+perf_all, key=pref+"perf")
-        elif large and large!="S・MACカーテン":
-            perf_opts = df_perf[df_perf["中分類"]==middle]["性能"].dropna().unique().tolist() if "中分類" in df_perf.columns else []
-            perf = st.selectbox("カーテン性能", [""]+perf_opts, key=pref+"perf2")
-
-    # S・MAC OP（任意）
-    picked_ops = []
-    if large=="S・MACカーテン" and not df_op.empty and all(c in df_op.columns for c in ["OP名称","金額","方向"]):
-        st.caption("S・MAC OP（任意／金額はカーテンに内包）")
-        names = df_op["OP名称"].dropna().unique().tolist()
-        cols = st.columns(3)
-        for i, nm in enumerate(names):
-            with cols[i%3]:
-                if st.checkbox(nm, key=pref+f"smac_op_{i}"):
-                    picked_ops.append(df_op[df_op["OP名称"]==nm].iloc[0].to_dict())
-
-    # ここから計算 → サマリ
-    if W>0 and H>0 and CNT>0:
-        if large=="S・MACカーテン":
-            sm = smac_estimate(middle or "", st.session_state.get(pref+"open") or "片引き",
-                               W, H, CNT, df_gen, df_op, picked_ops)
-            if sm["ok"]:
-                note = f"W{W}×H{H}mm"
-                if sm["note_ops"]:
-                    note += "／OP：" + "・".join(sm["note_ops"])
-                overall_items.append({
-                    "品名": "S・MACカーテン"
-                            + (f" {middle}" if middle else "")
-                            + (f" {st.session_state.get(pref+'open')}" if st.session_state.get(pref+'open') else ""),
-                    "数量": CNT,
-                    "単位": "式",
-                    "単価": sm["sell_one"],
-                    "小計": sm["sell_total"],
-                    "種別": "S・MAC",
-                    "備考": (f"符号:{mark}／" if mark else "") + note
-                })
-                overall_total_update(sm["sell_total"])
-
-                                # 原価構成（1間口あたり）を表示
-                bd = sm.get("breakdown", {})
-                if bd:
-                    with st.expander("原価構成（1間口あたり）", expanded=False):
-                        order = [
-                            "原反使用量(m)", "原反幅(mm)", "原反単価(円/m)",
-                            "原反材料(1式)", "裁断賃(1式)", "幅繋ぎ(1式)", "四方折り返し(1式)", "OP加算(1式)",
-                            "原価(1式)", "販売単価(1式)", "販売金額(数量分)", "粗利率"
-                        ]
-                        rows = []
-                        for k in order:
-                            if k not in bd:
-                                continue
-                            v = bd[k]
-                            if k == "原反使用量(m)":
-                                rows.append([k, f"{float(v):.2f} m"])
-                            elif k == "原反幅(mm)":
-                                rows.append([k, f"{int(v)} mm"])
-                            elif k == "原反単価(円/m)":
-                                rows.append([k, f"¥{int(v):,}/m"])
-                            elif k == "粗利率":
-                                rows.append([k, f"{float(v)*100:.1f}%"])
-                            else:
-                                rows.append([k, f"¥{int(v):,}"])
-
-                        st.dataframe(
-                            pd.DataFrame(rows, columns=["項目", "金額"]),
-                            use_container_width=True, hide_index=True
-                        )
-            else:
-                # ここは sm["ok"] が False のときに出す警告
-                st.warning(sm.get("msg") or "S・MACの計算に失敗しました。")
-
-
-        elif large=="エア・セーブ" and air_type:
-            if air_type=="MA" and air_item and perf:
-                r = area_price(df_ma, air_item, perf, W, H, CNT)
-                if r["ok"]:
-                    overall_items.append({
-                        "品名": f"エア・セーブ MA型折りたたみ式 {air_item}",
-                        "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["total"],
-                        "種別":"エア・セーブMA", "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
-                    })
-                    overall_total_update(r["total"])
-
-            elif air_type=="MB" and air_item and perf:
-                r = area_price(df_mb_tbl, air_item, perf, W, H, CNT)
-                if r["ok"]:
-                    overall_items.append({
-                        "品名": f"エア・セーブ MB型固定式 {air_item}",
-                        "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["total"],
-                        "種別":"エア・セーブMB",
-                        "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
-                                 + (f"／{st.session_state.get(pref+'rib')}" if st.session_state.get(pref+'rib') else "")
-                    })
-                    overall_total_update(r["total"])
-
-            elif air_type=="MC" and air_item and perf:
-                r = area_price(df_mc, air_item, perf, W, H, CNT)
-                if r["ok"]:
-                    rail = mc_slide_rail_price(W, CNT)
-                    total = r["total"] + rail
-                    overall_items.append({
-                        "品名": f"エア・セーブ MC型スライド式 {air_item}",
-                        "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["price_one"]*CNT,
-                        "種別":"エア・セーブMC",
-                        "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
-                                 + (f"／{st.session_state.get(pref+'rib')}" if st.session_state.get(pref+'rib') else "")
-                                 + (f"／{st.session_state.get(pref+'open')}" if st.session_state.get(pref+'open') else "")
-                    })
-                    overall_items.append({
-                        "品名": "スライドレール", "数量": 1, "単位":"式", "単価": rail, "小計": rail,
-                        "種別":"エア・セーブMC", "備考": "W×2を2000mm刻み"
-                    })
-                    overall_total_update(total)
-
-            elif air_type=="ME" and perf:
-                total_me = 0
-                if air_item:
-                    curt_df = df_me_curt.copy() if not df_me_curt.empty else df_mc.copy()
-                    r = area_price(curt_df, air_item, perf, W, H, CNT)
-                    if r["ok"]:
-                        overall_items.append({
-                            "品名": f"エア・セーブ ME型電動式 カーテン {air_item}",
-                            "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["total"],
-                            "種別":"エア・セーブME(カーテン)",
-                            "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
-                        })
-                        total_me += r["total"]
-                if st.session_state.get(pref+"me_motor"):
-                    mu = fixed_price(df_me_motor, st.session_state[pref+"me_motor"])
-                    if mu>0:
-                        overall_items.append({
-                            "品名": f"エア・セーブ ME型電動式 駆動部 {st.session_state[pref+'me_motor']}",
-                            "数量": CNT, "単位":"式", "単価": mu, "小計": mu*CNT,
-                            "種別":"エア・セーブME(駆動部)", "備考": ""
-                        })
-                        total_me += mu*CNT
-                if total_me>0:
-                    overall_total_update(total_me)
-
-    # ===== 部材入力：③品名ラジオ（既存ロジック） =====
-    show_parts = (
-        st.session_state.get(pref+"large")=="S・MACカーテン" or
-        (st.session_state.get(pref+"large")=="エア・セーブ" and (st.session_state.get(pref+"airtype") or "").startswith("MA"))
-    )
-    if show_parts:
-        st.markdown("##### 部材入力")
-        for sheet_name, dfp in df_parts.items():
-            rows_key = pref + f"{sheet_name}_rows"
-            if rows_key not in st.session_state:
-                st.session_state[rows_key] = [{"item":"", "qty":1}]
-
-            hcol1, hcol2 = st.columns([0.92, 0.08])
-            with hcol1: st.caption(f"【{sheet_name}】")
-            with hcol2:
-                if st.button("＋", key=pref+f"{sheet_name}_add"):
-                    st.session_state[rows_key].append({"item":"", "qty":1}); st.rerun()
-
-            name_col = pick_col(dfp, ["品名","製品名","名称","品番"]) or (dfp.columns[0] if not dfp.empty else None)
-            names = dfp[name_col].dropna().unique().tolist() if name_col else []
-            updated_rows = []
-            for j, rowdata in enumerate(st.session_state[rows_key]):
-                st.markdown('<div class="row-compact">', unsafe_allow_html=True)
-                col1, col2, col3, col4, col5 = st.columns([1.4,0.45,0.7,0.8,0.28])
-                with col1:
-                    item_opts = [""] + names
-                    current = rowdata["item"] if rowdata["item"] in item_opts else ""
-                    sel = st.radio(f"品名 {j+1}", item_opts, index=item_opts.index(current), key=pref+f"{sheet_name}_item_{j}_radio")
-                with col2:
-                    qty = st.number_input("数量", min_value=1, value=int(rowdata["qty"]), step=1, key=pref+f"{sheet_name}_qty_{j}")
-                unit, label, used_m = (0,"",0.0)
-                if sel:
-                    src_row = dfp[dfp[name_col]==sel].iloc[0] if not dfp.empty else None
-                    if src_row is not None:
-                        unit, label, used_m = price_part_row(sheet_name, src_row, W, H, dfp)
-                with col3: st.text_input("単価（自動）", value=str(unit), disabled=True, key=pref+f"{sheet_name}_unit_{j}")
-                with col4: st.text_input("使用m数（自動）", value=(f"{used_m:g}" if used_m else ""), disabled=True, key=pref+f"{sheet_name}_m_{j}")
-                with col5: delete = st.button("×", key=pref+f"{sheet_name}_del_{j}")
-                st.markdown('</div>', unsafe_allow_html=True)
-
-                if not delete:
-                    updated_rows.append({"item": sel, "qty": qty})
-                    if sel and unit>0:
-                        subtotal = unit*qty
-                        overall_items.append({
-                            "品名": sel, "数量": qty, "単位":"式", "単価": unit, "小計": subtotal,
-                            "種別":"部材", "備考": (f"符号:{mark}" if mark else "") + (f"／{label}" if label else "")
-                        })
-                        overall_total_update(subtotal)
-            st.session_state[rows_key] = updated_rows
-
-        # ④ 定型文（部材の下）
-        st.markdown("##### 定型文")
-        phr_sel = []
-        colL, colR = st.columns(2)
-        half = (len(PHRASES)+1)//2
-        with colL:
-            for i, p in enumerate(PHRASES[:half]):
-                if st.checkbox(p, key=pref+f"phr_L_{i}"): phr_sel.append(p)
-        with colR:
-            for i, p in enumerate(PHRASES[half:]):
-                if st.checkbox(p, key=pref+f"phr_R_{i}"): phr_sel.append(p)
-        if phr_sel:
-            overall_items.append({
-                "品名": "（定型文）", "数量": "", "単位":"", "単価": "", "小計":"", "種別":"メモ",
-                "備考": " / ".join(phr_sel)
-            })
-    else:
-        st.caption("※このカーテン構成では部材の追加は行いません。")
-
-# 描画
-for i, op in enumerate(st.session_state.openings, start=1):
-    with st.expander(f"間口 {i}", expanded=True):
-        render_opening(i)
-    cols = st.columns([0.16, 0.84])
-    if cols[0].button("この間口を削除", key=f"del_{i}") and len(st.session_state.openings)>1:
-        st.session_state.openings.pop(i-1); st.rerun()
-if st.button("＋ 間口を追加", key="add_opening"):
-    st.session_state.openings.append({"id": len(st.session_state.openings)+1}); st.rerun()
-
-# ===== サマリ =====
-st.markdown("---")
-sec_title("見積サマリ")
-if overall_items:
-    df_summary = pd.DataFrame(overall_items, columns=["品名","数量","単位","単価","小計","種別","備考"])
-    st.dataframe(df_summary, use_container_width=True, hide_index=True)
-else:
-    st.info("明細がありません。間口を追加し、カーテン／部材を入力してください。")
-
-sec_title("見積金額")
-st.metric("税抜合計", f"¥{overall_total:,}")
-
-# ===== ⑤ Excel出力：「お見積書（明細）」へ =====
-def header_dict():
-    created = st.session_state.get("created_disp") or datetime.today().strftime("%Y/%m/%d")
-    return {
-        "estimate_no":   st.session_state.get("estimate_no",""),
-        "date":          created.replace("/","-"),
-        "customer_name": st.session_state.get("client",""),
-        "branch_name":   st.session_state.get("branch",""),
-        "office_name":   st.session_state.get("office",""),
-        "person_name":   st.session_state.get("pic",""),
-        "project_name":  st.session_state.get("pj",""),
-    }
-
-def export_to_detail_xlsx(out_path: str, header: dict, items: list[dict], template_path: str | None = None):
-    # 既存テンプレートに「お見積書（明細）」があれば置き換え、無ければ新規作成
-    ws_name = "お見積書（明細）"
-    if template_path and osp.exists(template_path):
-        wb = load_workbook(template_path)
-        if ws_name in wb.sheetnames:
-            wb.remove(wb[ws_name])
-        ws = wb.create_sheet(ws_name)
-    else:
-        wb = Workbook()
-        ws = wb.active; ws.title = ws_name
-
-    # ヘッダー情報
-    ws["A1"] = "見積番号"; ws["B1"] = header.get("estimate_no","")
-    ws["A2"] = "作成日";   ws["B2"] = header.get("date","")
-    ws["A3"] = "得意先";   ws["B3"] = header.get("customer_name","")
-    ws["A4"] = "支店";     ws["B4"] = header.get("branch_name","")
-    ws["A5"] = "営業所";   ws["B5"] = header.get("office_name","")
-    ws["A6"] = "担当者";   ws["B6"] = header.get("person_name","")
-    ws["A7"] = "物件名";   ws["B7"] = header.get("project_name","")
-
-    start = 9
-    cols = ["品名","数量","単位","単価","小計","種別","備考"]
-    for j,c in enumerate(cols, start=1): ws.cell(row=start, column=j, value=c)
-    r = start + 1
-    for it in items:
-        ws.cell(r,1,it.get("品名",""))
-        ws.cell(r,2,it.get("数量",""))
-        ws.cell(r,3,it.get("単位",""))
-        ws.cell(r,4,it.get("単価",""))
-        ws.cell(r,5,it.get("小計",""))
-        ws.cell(r,6,it.get("種別",""))
-        ws.cell(r,7,it.get("備考",""))
-        r += 1
-    wb.save(out_path)
-
-# 保存UI（CSVは従来通り残しつつ、Excel出力を追加）
-sec_title("保存")
-with c2:
-# ==== 運賃・梱包（見積書0の末尾に記載・明細には載せません） ====
-st.markdown("### 運賃・梱包（見積書0の末尾に記載・明細には載せません）")
-
-ship_c1, ship_c2 = st.columns([2, 2])
-
-with ship_c1:
-    # ← with の直後は必ずインデントされた処理行にする
-    ship_option = st.radio(
-        "配送条件",
-        options=["（路線便時間指定不可）", "（現場搬入時間指定可）"],
-        index=0,
-        key="ship_option",
-        horizontal=False
-    )
-
-with ship_c2:
-    ship_price = st.number_input(
-        "運賃・梱包 金額（円）",
-        min_value=0,
-        step=100,
-        value=int(st.session_state.get("ship_price", 0)),
-        key="ship_price"
-    )
-
+# ===== S・MAC または エア・セーブ MA 型を含む → 梱包・運賃必須 =====
 def _shipping_required(items: list[dict]) -> bool:
-    """S・MAC または エア・セーブ MA 型が含まれていれば必須"""
-    import re
     for it in items or []:
         name = str(it.get("品名") or it.get("name") or it.get("product") or "")
         if "S・MAC" in name:
@@ -920,64 +45,227 @@ def _shipping_required(items: list[dict]) -> bool:
             return True
     return False
 
-    
-# （←この行は説明なので貼らなくてOK）保存セクション：この塊だけを使います
-sc1, sc2 = st.columns([1, 2])
-with sc2:
-    if st.button("Excel保存（お見積書（明細））", key="excel_save_btn"):
-        if not overall_items:
-            st.error("明細がありません。")
-        else:
-            # 必須チェック：S・MAC or エア・セーブMA が含まれる場合、金額必須
-            if _shipping_required(overall_items) and st.session_state.get("ship_price", 0) <= 0:
+
+# ===== セッション初期化 =====
+def _ensure_session():
+    ss = st.session_state
+    ss.setdefault("file_title", "見積")
+    ss.setdefault("rep_name", "")
+    if "estimate_no" not in ss:
+        ss.estimate_no = _next_estimate_no()
+
+    # 得意先情報
+    ss.setdefault("customer_name", "")
+    ss.setdefault("branch_name", "")
+    ss.setdefault("office_name", "")
+    ss.setdefault("project_name", "")
+
+    # 明細（間口）構造
+    # openings = [ { "name":"開口1", "items":[{品名,数量,単位,単価},...], "teikeiku":[...] }, ... ]
+    if "openings" not in ss:
+        ss.openings = [{
+            "name": "開口1",
+            "items": [{"品名":"", "数量":1, "単位":"式", "単価":0}],
+            "teikeiku": []
+        }]
+    ss.setdefault("ship_option", "（路線便時間指定不可）")
+    ss.setdefault("ship_price", 0)
+
+    # overall_items は保存前に生成（UI編集中も更新しておく）
+    ss.setdefault("overall_items", [])
+
+
+# ===== ヘッダー（担当者名・見積番号） =====
+def _header_section():
+    st.title("お見積書作成システム")
+
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        st.session_state.rep_name = st.text_input(
+            "担当者名（半角英数2〜4）",
+            value=st.session_state.rep_name,
+            key="rep_name_input",
+        )
+        if st.session_state.rep_name and not re.fullmatch(r"[A-Za-z0-9]{2,4}", st.session_state.rep_name):
+            st.error("担当者名は半角英数字2〜4文字で入力してください。")
+    with col2:
+        st.text_input("見積番号", st.session_state.estimate_no, key="estimate_no", disabled=True)
+    with col3:
+        st.text_input("保存ファイル名（接頭辞）", st.session_state.file_title, key="file_title")
+
+    st.divider()
+
+
+# ===== 得意先情報 =====
+def _customer_section():
+    st.markdown("### 得意先情報")
+    c1, c2, c3 = st.columns([2, 2, 2])
+    with c1:
+        st.session_state.customer_name = st.text_input("得意先名", value=st.session_state.customer_name, key="customer_name")
+    with c2:
+        st.session_state.branch_name = st.text_input("支店名", value=st.session_state.branch_name, key="branch_name")
+    with c3:
+        st.session_state.office_name = st.text_input("営業所名", value=st.session_state.office_name, key="office_name")
+
+    st.session_state.project_name = st.text_input("物件名（見積書0のB17）", value=st.session_state.project_name, key="project_name")
+    st.divider()
+
+
+# ===== 明細編集（間口単位・入力順） =====
+def _openings_section():
+    st.markdown("### 明細入力（間口ごと・入力順で転記）")
+    # 間口一覧
+    for oi, op in enumerate(st.session_state.openings):
+        with st.expander(f"間口 {oi+1}：{op.get('name') or '(名称未設定)'}", expanded=True):
+            # 間口名
+            op["name"] = st.text_input("間口名", value=op.get("name",""), key=f"opening_name_{oi}")
+
+            # 明細行エディタ
+            st.write("明細行（A=品名 / F=数量 / G=単位 / H=単価）")
+            # 各行
+            remove_idx = None
+            for ri, row in enumerate(op["items"]):
+                cols = st.columns([5, 1, 1, 2, 0.8])
+                with cols[0]:
+                    row["品名"] = st.text_input("品名", value=str(row.get("品名","")), key=f"op{oi}_row{ri}_name")
+                with cols[1]:
+                    row["数量"] = st.number_input("数量", value=int(row.get("数量",1)), step=1, min_value=0, key=f"op{oi}_row{ri}_qty")
+                with cols[2]:
+                    row["単位"] = st.text_input("単位", value=str(row.get("単位","式")), key=f"op{oi}_row{ri}_unit")
+                with cols[3]:
+                    row["単価"] = st.number_input("単価（円）", value=int(row.get("単価",0)), step=100, min_value=0, key=f"op{oi}_row{ri}_price")
+                with cols[4]:
+                    if st.button("−", key=f"op{oi}_row{ri}_del"):
+                        remove_idx = ri
+                st.write("")  # 下部マージン
+            if remove_idx is not None and 0 <= remove_idx < len(op["items"]):
+                del op["items"][remove_idx]
+
+            # 行追加
+            if st.button("＋ 行を追加", key=f"op{oi}_addrow"):
+                op["items"].append({"品名":"", "数量":1, "単位":"式", "単価":0})
+
+            st.write("---")
+            # 定型句：末尾の A 列に出力
+            teikei_text = "\n".join(op.get("teikeiku") or [])
+            teikei_text = st.text_area("定型句（1行=1文、間口末尾の A 列に出力）", value=teikei_text, key=f"op{oi}_teikei", height=80)
+            op["teikeiku"] = [s for s in teikei_text.splitlines() if s.strip()]
+
+            # 間口削除
+            cols_del = st.columns([6,1])
+            with cols_del[1]:
+                if st.button("× この間口を削除", key=f"op{oi}_del"):
+                    st.session_state.openings.pop(oi)
+                    st.experimental_rerun()
+
+    # 間口追加
+    if st.button("＋ 間口を追加", key="opening_add"):
+        st.session_state.openings.append({
+            "name": f"開口{len(st.session_state.openings)+1}",
+            "items": [{"品名":"", "数量":1, "単位":"式", "単価":0}],
+            "teikeiku": []
+        })
+
+    st.divider()
+
+    # overall_items を更新（形式1に統一）
+    st.session_state.overall_items = [{
+        "name": op.get("name",""),
+        "items": list(op.get("items") or []),
+        "teikeiku": list(op.get("teikeiku") or []),
+    } for op in st.session_state.openings]
+
+
+# ===== 運賃・梱包（見積書0の末尾に記載・明細には載せない） =====
+def _shipping_section():
+    st.markdown("### 運賃・梱包（見積書0の末尾に記載・明細には載せません）")
+    ship_c1, ship_c2 = st.columns([2, 2])
+    with ship_c1:
+        st.session_state.ship_option = st.radio(
+            "配送条件",
+            options=["（路線便時間指定不可）", "（現場搬入時間指定可）"],
+            index=0 if st.session_state.ship_option == "（路線便時間指定不可）" else 1,
+            key="ship_option",
+            horizontal=False,
+        )
+    with ship_c2:
+        st.session_state.ship_price = st.number_input(
+            "運賃・梱包 金額（円）",
+            min_value=0,
+            step=100,
+            value=int(st.session_state.ship_price),
+            key="ship_price",
+        )
+    st.divider()
+
+
+# ===== 保存（唯一の保存ボタン） =====
+def _save_section():
+    st.markdown("### 保存")
+    s1, s2 = st.columns([1, 2])
+    with s2:
+        if st.button("Excel保存（お見積書（明細））", key="excel_save_btn"):
+            overall_items = st.session_state.get("overall_items", [])
+            if not overall_items:
+                st.error("明細がありません。")
+                st.stop()
+
+            # 梱包・運賃 必須チェック
+            flat_items = []
+            for op in overall_items:
+                flat_items.extend(op.get("items", []))
+            if _shipping_required(flat_items) and int(st.session_state.get("ship_price", 0)) <= 0:
                 st.error("S・MAC または エア・セーブ MA 型を含むため、運賃・梱包の金額入力が必須です。")
                 st.stop()
 
-            # header の追加情報（担当者名／見積番号／運賃・梱包）を統合
-            header = header_dict() if "header_dict" in globals() else {}
-            header.update({
-                "担当者名": st.session_state.get("rep_name",""),
-                "見積番号": st.session_state.get("estimate_no",""),
+            # ヘッダ辞書（見積書0へ）
+            header = {
+                "見積番号": st.session_state.estimate_no,
+                "作成日": date.today().strftime("%Y/%m/%d"),
+                "得意先名": st.session_state.customer_name,
+                "支店名": st.session_state.branch_name,
+                "営業所名": st.session_state.office_name,
+                "担当者名": st.session_state.rep_name,
+                "物件名": st.session_state.project_name,
+                # 見積書0の末尾に『空行なしで連続』追記（明細には載せない）
                 "shipping": {
                     "label": "運賃・梱包",
-                    "option": st.session_state.get("ship_option", "（路線便時間指定不可）"),
+                    "option": st.session_state.ship_option,
                     "qty": 1,
                     "unit": "式",
-                    "price": int(st.session_state.get("ship_price", 0)),
-                }
-            })
+                    "price": int(st.session_state.ship_price),
+                },
+            }
 
-            out = osp.join(save_dir, f"{st.session_state.file_title}_お見積書（明細）.xlsx")
+            file_title = st.session_state.get("file_title", "見積")
+            out = osp.join(os.getcwd(), f"{file_title}_お見積書（明細）.xlsx")
             tpl = str(TEMPLATE_BOOK) if TEMPLATE_BOOK.exists() else str(APP_DIR / "お見積書（明細）.xlsx")
 
             try:
-                # テンプレ判定（見積書0/1〜5 が揃っていれば新ルート）
+                # 新テンプレ（見積書0/1〜5）判定
                 use_new = False
                 if tpl and osp.exists(tpl):
                     try:
                         _wb_check = load_workbook(tpl, data_only=False)
                         sn = set(_wb_check.sheetnames)
-                        use_new = ("見積書0" in sn) and all(f"見積書{i}" in sn for i in range(1,6))
+                        use_new = ("見積書0" in sn) and all(f"見積書{i}" in sn for i in range(1, 6))
                     except Exception:
                         use_new = False
 
-                if use_new:
-                    # 見積書0：間口合計は空行なしで連続記載
-                    # その直後に『運賃・梱包』（数量=1/単位=式/単価=入力値）を追記
+                if use_new and export_quotation_book_preserve is not None:
+                    # 見積書0：ヘッダー＆間口合計（空行なし連続）→直後に運賃・梱包
+                    # 見積書1〜5：明細（12〜44行、11行目は触らない／A=品名 F=数量 G=単位 H=単価）
                     export_quotation_book_preserve(
                         out, header, overall_items,
                         template_path=tpl,
                         header_sheet="見積書0",
-                        detail_sheets=[f"見積書{i}" for i in range(1,6)],
+                        detail_sheets=[f"見積書{i}" for i in range(1, 6)],
                         start_row=12, end_row=44,
                     )
                 else:
-                    # 旧テンプレ互換（関数がある時のみ）
+                    # 旧テンプレ互換（単一シート／33行/頁／5頁制限）
                     if export_detail_xlsx_preserve is None:
-                        raise ImportError(
-                            "旧テンプレ互換の export_detail_xlsx_preserve が見つかりません。"
-                            "テンプレートに『見積書0』『見積書1〜5』があるファイルをご用意ください。"
-                        )
+                        raise ImportError("旧テンプレ互換の export_detail_xlsx_preserve が見つかりません。")
                     export_detail_xlsx_preserve(
                         out, header, overall_items,
                         template_path=tpl if (tpl and osp.exists(tpl)) else None,
@@ -993,8 +281,320 @@ with sc2:
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key="excel_dl_btn",
                     )
+
             except ValueError as e:
-                st.error(str(e))  # 例：5ページ超過
+                # 例：5ページ超過「5ページを超えました。生成不可」
+                st.error(str(e))
             except Exception as e:
                 st.error("Excel出力でエラーが発生しました。")
                 st.exception(e)
+
+
+def main():
+    st.set_page_config(layout="wide")
+    _ensure_session()
+    _header_section()
+    _customer_section()
+    _openings_section()
+    _shipping_section()
+    _save_section()
+
+
+if __name__ == "__main__":
+    main()
+# excel_export.py - テンプレ罫線/結合を維持した転記（見積書0/1〜5対応）
+
+from __future__ import annotations
+from typing import List, Dict, Any
+from openpyxl import load_workbook
+from openpyxl.worksheet.worksheet import Worksheet
+
+
+# ========== 内部ユーティリティ ==========
+
+def _to_int(x) -> int:
+    try:
+        return int(x)
+    except Exception:
+        try:
+            return int(float(x))
+        except Exception:
+            return 0
+
+
+def _first_curtain_name(items: List[Dict[str, Any]]) -> str:
+    """間口内で最初に登場したカーテン種別（S・MAC／エア・セーブ各型／ME(カーテン)）を採用"""
+    if not items:
+        return ""
+    keywords = ["S・MAC", "エア・セーブ", "ME", "カーテン"]
+    for it in items:
+        name = str(it.get("品名") or it.get("name") or it.get("product") or "")
+        for kw in keywords:
+            if kw in name:
+                return name
+    return str(items[0].get("品名") or items[0].get("name") or items[0].get("product") or "")
+
+
+def _opening_total(items: List[Dict[str, Any]]) -> int:
+    """間口合計：各明細 (数量×単価) の合計"""
+    total = 0
+    for it in items:
+        qty = _to_int(it.get("数量") or it.get("qty") or 0)
+        unit_price = _to_int(it.get("単価") or it.get("unit_price") or 0)
+        total += qty * unit_price
+    return total
+
+
+def _normalize_openings(overall_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    overall_items を「間口」配列に正規化。
+      1) [{ "name": "...", "items": [...], "teikeiku": [...] }, ...]
+      2) フラット配列に "開口"/"間口" → 連続同名でグループ化
+      3) どれでもない → 全体を1間口
+    """
+    if not overall_items:
+        return []
+
+    if isinstance(overall_items[0], dict) and "items" in overall_items[0]:
+        openings = []
+        for op in overall_items:
+            openings.append({
+                "name": op.get("name") or op.get("開口") or op.get("間口") or "",
+                "items": list(op.get("items") or []),
+                "teikeiku": list(op.get("teikeiku") or []),
+            })
+        return openings
+
+    has_key = any(("開口" in it) or ("間口" in it) for it in overall_items if isinstance(it, dict))
+    if has_key:
+        openings = []
+        current_name = None
+        bucket: List[Dict[str, Any]] = []
+        for it in overall_items:
+            name = it.get("開口") or it.get("間口") or ""
+            if current_name is None:
+                current_name = name
+            if name != current_name:
+                openings.append({"name": current_name or "", "items": bucket, "teikeiku": []})
+                bucket = []
+                current_name = name
+            bucket.append(it)
+        if bucket:
+            openings.append({"name": current_name or "", "items": bucket, "teikeiku": []})
+        return openings
+
+    return [{"name": "", "items": overall_items, "teikeiku": []}]
+
+
+# ========== 見積書0：ヘッダー & 集約 ==========
+
+def _write_header(ws0: Worksheet, header: Dict[str, Any]) -> None:
+    # 指定：見積番号:J1 / 作成日:J3 / 得意先名:A6 / 支店名 営業所名:A7（間は半角スペース）/ 担当者名:A8 / 物件名:B17
+    ws0["J1"].value = header.get("見積番号", "")
+    ws0["J3"].value = header.get("作成日", "")
+    ws0["A6"].value = header.get("得意先名", "")
+    b = header.get("支店名", "")
+    o = header.get("営業所名", "")
+    ws0["A7"].value = (str(b) + " " + str(o)).strip()
+    ws0["A8"].value = header.get("担当者名", "")
+    ws0["B17"].value = header.get("物件名", "")
+
+
+def _write_sheet0_totals(ws0: Worksheet, openings: List[Dict[str, Any]], header: Dict[str, Any]) -> None:
+    """
+    A=品名（カーテン品名）/ F=数量(1) / G=単位(式) / H=単価(=間口合計)
+    21〜44行に『空行なしで連続』で記載。直後に「運賃・梱包」を追記（空行なし）。
+    """
+    row = 21  # 指定：21〜44
+    for op in openings:
+        items = op.get("items", [])
+        curtain = _first_curtain_name(items)
+        total = _opening_total(items)
+
+        ws0.cell(row=row, column=1).value = curtain      # A
+        ws0.cell(row=row, column=6).value = 1            # F
+        ws0.cell(row=row, column=7).value = "式"         # G
+        ws0.cell(row=row, column=8).value = total        # H
+
+        row += 1
+        if row > 44:
+            raise ValueError("見積書0の行数が 21〜44 を超えました。")
+
+    # shipping を直後に追記（空行なし）
+    ship = header.get("shipping")
+    if ship and _to_int(ship.get("price", 0)) > 0:
+        label = str(ship.get("label", "運賃・梱包")) + str(ship.get("option", ""))
+        ws0.cell(row=row, column=1).value = label
+        ws0.cell(row=row, column=6).value = 1
+        ws0.cell(row=row, column=7).value = "式"
+        ws0.cell(row=row, column=8).value = _to_int(ship.get("price", 0))
+
+
+# ========== 見積書1〜5：明細（入力順） ==========
+
+def _write_detail_row(ws: Worksheet, row: int, it: Dict[str, Any]) -> None:
+    """A=品名 / F=数量 / G=単位 / H=単価（11行目は触らない・12行目から）"""
+    name = str(it.get("品名") or it.get("name") or it.get("product") or "")
+    qty = it.get("数量") if it.get("数量") is not None else it.get("qty")
+    unit = it.get("単位") if it.get("単位") is not None else it.get("unit")
+    price = it.get("単価") if it.get("単価") is not None else it.get("unit_price")
+
+    ws.cell(row=row, column=1).value = name
+    ws.cell(row=row, column=6).value = qty
+    ws.cell(row=row, column=7).value = unit
+    ws.cell(row=row, column=8).value = price
+
+
+def _write_details(
+    wb,
+    openings: List[Dict[str, Any]],
+    detail_sheets: List[str],
+    start_row: int = 12,
+    end_row: int = 44,
+) -> None:
+    """
+    - 表示は入力順
+    - 11行目は触らない → start_row=12 固定
+    - 1ページ=33行（12〜44）
+    - 1間口が33行以内なら『同一ページ内に収める』（不足ならページ送り）
+    - 1間口が33行を超える場合のみページ跨ぎOK
+    - 最大5ページ、超えたら ValueError("5ページを超えました。生成不可")
+    - 定型句は各間口末尾に A 列
+    """
+    rows_per_page = end_row - start_row + 1
+    page_max = len(detail_sheets)
+    page_idx = 0
+    ws = wb[detail_sheets[page_idx]]
+    r = start_row
+
+    def ensure_next_page():
+        nonlocal page_idx, ws, r
+        page_idx += 1
+        if page_idx >= page_max:
+            raise ValueError("5ページを超えました。生成不可")
+        ws = wb[detail_sheets[page_idx]]
+        r = start_row
+
+    for op in openings:
+        items = list(op.get("items", []))
+        teikeiku = list(op.get("teikeiku", []))
+        need = len(items) + len(teikeiku)
+
+        if need <= rows_per_page:
+            # 今のページに入らなければページ送りして丸ごと収める
+            if r + need - 1 > end_row:
+                ensure_next_page()
+            for it in items:
+                _write_detail_row(ws, r, it)
+                r += 1
+            for s in teikeiku:
+                ws.cell(row=r, column=1).value = str(s)
+                r += 1
+        else:
+            # 33行超：ページ跨ぎで連続記載
+            idx = 0
+            while idx < len(items):
+                if r > end_row:
+                    ensure_next_page()
+                _write_detail_row(ws, r, items[idx])
+                r += 1
+                idx += 1
+            for s in teikeiku:
+                if r > end_row:
+                    ensure_next_page()
+                ws.cell(row=r, column=1).value = str(s)
+                r += 1
+
+
+# ========== 公開関数：新テンプレ（見積書0 + 見積書1〜5） ==========
+
+def export_quotation_book_preserve(
+    out_path: str,
+    header: Dict[str, Any],
+    overall_items: List[Dict[str, Any]],
+    *,
+    template_path: str,
+    header_sheet: str = "見積書0",
+    detail_sheets: List[str] | None = None,
+    start_row: int = 12,
+    end_row: int = 44,
+) -> None:
+    if detail_sheets is None:
+        detail_sheets = [f"見積書{i}" for i in range(1, 6)]
+
+    wb = load_workbook(template_path)
+    if header_sheet not in wb.sheetnames:
+        raise ValueError(f"テンプレートに {header_sheet} がありません。")
+    for s in detail_sheets:
+        if s not in wb.sheetnames:
+            raise ValueError(f"テンプレートに {s} がありません。")
+
+    # 見積書0：ヘッダー & 集約
+    ws0 = wb[header_sheet]
+    _write_header(ws0, header)
+    openings = _normalize_openings(overall_items)
+    _write_sheet0_totals(ws0, openings, header)
+
+    # 見積書1〜5：明細
+    _write_details(wb, openings, detail_sheets, start_row=start_row, end_row=end_row)
+
+    wb.save(out_path)
+
+
+# ========== 公開関数：旧テンプレ互換（単一シート） ==========
+
+def export_detail_xlsx_preserve(
+    out_path: str,
+    header: Dict[str, Any],
+    overall_items: List[Dict[str, Any]],
+    *,
+    template_path: str | None,
+    ws_name: str = "お見積書（明細）",
+    start_row: int = 12,
+    max_rows: int = 33,
+) -> None:
+    """
+    旧テンプレ互換：単一シートに 33 行/ページで積み上げ、5ページ超で停止。
+    shipping は明細に載せない（ユーザー指示）。
+    """
+    if not template_path:
+        raise ValueError("旧テンプレ互換には template_path が必要です。")
+    wb = load_workbook(template_path)
+    if ws_name not in wb.sheetnames:
+        raise ValueError(f"テンプレートに {ws_name} がありません。")
+
+    ws = wb[ws_name]
+    ws["J1"].value = header.get("見積番号", "")
+    ws["J3"].value = header.get("作成日", "")
+
+    page = 0
+    row = start_row
+    rows_per_page = max_rows
+    pages_limit = 5
+
+    openings = _normalize_openings(overall_items)
+
+    def ensure_next_page():
+        nonlocal page, row
+        page += 1
+        if page >= pages_limit:
+            raise ValueError("5ページを超えました。生成不可")
+        row = start_row + page * rows_per_page
+
+    for op in openings:
+        items = list(op.get("items", []))
+        teikeiku = list(op.get("teikeiku", []))
+        need = len(items) + len(teikeiku)
+
+        while (row - (start_row + page * rows_per_page)) + need > rows_per_page:
+            ensure_next_page()
+
+        for it in items:
+            _write_detail_row(ws, row, it)
+            row += 1
+
+        for s in teikeiku:
+            ws.cell(row=row, column=1).value = str(s)
+            row += 1
+
+    wb.save(out_path)
