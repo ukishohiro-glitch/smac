@@ -1,14 +1,10 @@
 # -*- coding: utf-8 -*-
-# main.py — 本番対応 完全版
-# 要件：
-#  - 見積番号：3709-xxxxx（5桁乱数・重複なし）、再生成ボタンなし、担当者名は別欄（半角英数2〜4）
-#  - master.xlsx 連動（得意先／カーテン系／部材／OP）
-#  - 見積書0：J1/J3/A6/A7/A8/B17 転記、行21〜44に「間口合計」連続（空行なし）＋末尾に「運賃・梱包」
-#    A=最初のカーテン品名、F=1、G=式、H=間口合計
-#  - 見積書1〜5：11行目は触らず、12〜44に明細。1ページ=33行。
-#    1間口≤33はページ跨ぎ禁止、>33は跨ぎ可。総ページ>5はエラー。
-#    定型句は各間口の末尾のA列に出力（数量/単位/単価なし）
-#  - バリデーション：見積書0行数(最大24行)、運賃必須条件未入力、総ページ>5、テンプレート不足
+# main.py — 本番対応 完全版（修正反映）
+# 変更点：
+#  1) 得意先担当者は全角ひらがな入力。見積番号の先頭に弊社担当者番号（半角英数2〜3）を付与。
+#  2) Excelテンプレ名を「見積書（明細）.xlsx」に変更（見積書0〜5 への直接転記）。
+#  3) 部材入力の「＋」ボタンを各部材シート名の右横（同一行右端）に配置。
+#  4) 部材入力でラジオ選択時、同項目の他品名を「畳む」（空欄ボタンは残す／空欄に戻すと全候補再表示）。
 
 import os, os.path as osp, secrets, math, re, unicodedata
 from datetime import datetime, date
@@ -19,7 +15,7 @@ from pathlib import Path
 
 # ===== パス =====
 APP_DIR = Path(__file__).parent
-TEMPLATE_BOOK = APP_DIR / "見積書テンプレ.xlsx"
+TEMPLATE_BOOK = APP_DIR / "見積書（明細）.xlsx"     # ← (変更) テンプレファイル名
 MASTER_BOOK   = APP_DIR / "master.xlsx"
 
 # ===== ユーティリティ =====
@@ -105,9 +101,9 @@ def load_master():
             df_ma, df_mb_tbl, df_mc, df_me_curt, df_me_motor,
             df_op, df_gap, df_parts, df_gen)
 
-# ===== S・MAC計算（既存ロジック） =====
+# ===== S・MAC 計算 =====
 def extract_thickness(text: str) -> float | None:
-    m = re.search(r"(\d+(?:\.\d+)?)\s*t", str(text or "")); 
+    m = re.search(r"(\d+(?:\.\d+)?)\s*t", str(text or ""))
     if m:
         try: return float(m.group(1))
         except: return None
@@ -155,10 +151,8 @@ def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int,
     raw_one = gen_price * raw_len_m
 
     cutting_one = (2000 if joints <= 3 else 3000) * panels
-
     seams_total = max(0, joints - 1) * panels
     seam_one = math.ceil(cur_h/1000.0) * SEAM_UNIT_PER_M * seams_total
-
     hem_unit = HEM_UNIT_THIN if (thick is not None and thick <= 0.3) else HEM_UNIT_THICK
     hem_perimeter_m = (cur_w + cur_w + cur_h + cur_h) / 1000.0
     fourfold_one = math.ceil(hem_perimeter_m) * hem_unit * panels
@@ -327,7 +321,7 @@ def generate_estimate_no(seen_serials: set[str]) -> str:
 # ===== 画面セットアップ =====
 st.set_page_config(layout="wide", page_title="お見積書作成システム")
 
-# CSS 少し整える
+# CSS
 st.markdown("""
 <style>
 section.main > div.block-container { padding-top: 8px; padding-bottom: 10px; padding-left: 10px; padding-right: 10px; }
@@ -348,7 +342,8 @@ def sec_title(text: str): st.markdown(f'<div class="sec-h">{text}</div>', unsafe
 
 # セッション
 if "seen_serials" not in st.session_state: st.session_state.seen_serials = set()
-if "estimate_no" not in st.session_state: st.session_state.estimate_no = generate_estimate_no(st.session_state.seen_serials)
+# (変更) ベース番号を保持し、表示時に弊社担当者番号でプレフィックス連結
+if "estimate_base" not in st.session_state: st.session_state.estimate_base = generate_estimate_no(st.session_state.seen_serials)
 if "openings" not in st.session_state:    st.session_state.openings = [{"id":1}]
 if "file_title_manual" not in st.session_state: st.session_state.file_title_manual = False
 if "file_title" not in st.session_state:        st.session_state.file_title = datetime.today().strftime("%m%d")
@@ -356,7 +351,7 @@ if "file_title" not in st.session_state:        st.session_state.file_title = da
 # ===== ヘッダ =====
 st.markdown('<div class="sticky-wrap">', unsafe_allow_html=True)
 sec_title("お見積書作成システム")
-# 担当者コード・再生成ボタンは廃止。担当者名を別欄に。
+
 d1,d2,d3,d4 = st.columns([1.1,1.1,1.1,1.1])
 clients = df_clients["社名"].dropna().unique().tolist() if "社名" in df_clients.columns else []
 with d1:
@@ -368,19 +363,29 @@ with d3:
     offices = df_clients[(df_clients["社名"]==sel_client)&(df_clients["支店名"]==sel_branch)]["営業所名"].dropna().unique().tolist() if sel_client and sel_branch and "営業所名" in df_clients.columns else []
     sel_office = st.selectbox("営業所名", [""]+offices, key="office")
 with d4:
-    person = st.text_input("担当者名（半角英数2〜4）", key="pic")
-    if person and not re.match(r"^[A-Za-z0-9]{2,4}$", person):
-        st.error("担当者名は半角英数2〜4桁で入力してください。")
+    # (変更) 得意先担当者（全角ひらがな）
+    person = st.text_input("担当者（得意先・全角ひらがな）", key="customer_pic")
+    if person and not re.match(r"^[\u3041-\u3096ー\s]+$", person):
+        st.error("担当者は全角ひらがなで入力してください。")
 
-e1,e2,e3 = st.columns([2.2,0.9,0.9])
-with e1:
+# (変更) 弊社担当者番号（見積番号プレフィックス）
+k1,k2,k3 = st.columns([1.2,1.0,0.8])
+with k1:
     pj_name = st.text_input("物件名", key="pj")
     if not st.session_state.file_title_manual:
         st.session_state.file_title = f"{datetime.today().strftime('%m%d')}{pj_name}" if pj_name else datetime.today().strftime('%m%d')
-with e2:
-    st.text_input("見積番号", value=st.session_state.estimate_no, key="estimate_no", disabled=True)
-with e3:
+with k2:
+    our_staff_code = st.text_input("弊社担当者番号（半角英数2〜3）", key="our_staff_code")
+    if our_staff_code and not re.match(r"^[A-Za-z0-9]{2,3}$", our_staff_code):
+        st.error("弊社担当者番号は半角英数2〜3桁で入力してください。")
+with k3:
+    composed_no = f"{our_staff_code}-{st.session_state.estimate_base}" if our_staff_code else st.session_state.estimate_base
+    st.text_input("見積番号", value=composed_no, key="estimate_no_disp", disabled=True)
+
+m1 = st.columns([1.0])[0]
+with m1:
     st.text_input("作成日", value=date.today().strftime("%Y/%m/%d"), key="created_disp", disabled=True)
+
 st.markdown('<div class="hr-thin"></div>', unsafe_allow_html=True)
 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -391,7 +396,7 @@ def overall_total_update(v):
     global overall_total
     overall_total += int(v or 0)
 
-# ===== 間口UI＋見積ロジック（既存render_openingを拡張：opening番号を保持, 定型句は「メモ」行で収集） =====
+# ===== 間口UI＋見積ロジック =====
 PHRASES = [
     "金具：スチール", "金具：ステンレス",
     "戸先側：取手付間仕切りポール", "戸尻側：フラットバー固定", "戸尻側：取手付間仕切りポール", "戸尻側：吊下げ固定",
@@ -598,7 +603,8 @@ def render_opening(idx: int):
             if rows_key not in st.session_state:
                 st.session_state[rows_key] = [{"item":"", "qty":1}]
 
-            hcol1, hcol2 = st.columns([0.92, 0.08])
+            # (変更) 「＋」を各シート名の右横（同一行右端）に配置しやすい比率
+            hcol1, hcol2 = st.columns([0.86, 0.14])
             with hcol1: st.caption(f"【{sheet_name}】")
             with hcol2:
                 if st.button("＋", key=pref+f"{sheet_name}_add"):
@@ -611,9 +617,20 @@ def render_opening(idx: int):
                 st.markdown('<div class="row-compact">', unsafe_allow_html=True)
                 col1, col2, col3, col4, col5 = st.columns([1.4,0.45,0.7,0.8,0.28])
                 with col1:
-                    item_opts = [""] + names
-                    current = rowdata["item"] if rowdata["item"] in item_opts else ""
-                    sel = st.radio(f"品名 {j+1}", item_opts, index=item_opts.index(current), key=pref+f"{sheet_name}_item_{j}_radio")
+                    # (変更) ラジオ：選択済みなら「空欄」と「選択中」のみ表示、未選択なら全候補
+                    all_item_opts = names
+                    current = rowdata["item"] if rowdata["item"] in ([""] + all_item_opts) else ""
+                    item_opts = [""] + ([current] if current else all_item_opts)
+                    try:
+                        default_idx = item_opts.index(current) if current in item_opts else 0
+                    except ValueError:
+                        default_idx = 0
+                    sel = st.radio(
+                        f"品名 {j+1}",
+                        item_opts,
+                        index=default_idx,
+                        key=pref+f"{sheet_name}_item_{j}_radio"
+                    )
                 with col2:
                     qty = st.number_input("数量", min_value=1, value=int(rowdata["qty"]), step=1, key=pref+f"{sheet_name}_qty_{j}")
                 unit, label, used_m = (0,"",0.0)
@@ -638,7 +655,7 @@ def render_opening(idx: int):
                         overall_total_update(subtotal)
             st.session_state[rows_key] = updated_rows
 
-        # 定型文：メモとして opening 単位で保持（Excelでは間口末尾A列に出力）
+        # 定型文（間口末尾A列へ1行で出力）
         st.markdown("##### 定型文")
         phr_sel = []
         colL, colR = st.columns(2)
@@ -670,6 +687,7 @@ if st.button("＋ 間口を追加", key="add_opening"):
 
 # ===== サマリ表示（画面） =====
 st.markdown("---")
+def sec_title(text: str): st.markdown(f'<div class="sec-h">{text}</div>', unsafe_allow_html=True)
 sec_title("見積サマリ")
 if overall_items:
     df_summary = pd.DataFrame(overall_items, columns=["opening","品名","数量","単位","単価","小計","種別","備考"])
@@ -686,7 +704,7 @@ sec_title("運賃・梱包")
 ship_method = st.radio("配送条件", ["","路線便時間指定不可","現場搬入時間指定可"], horizontal=True, key="ship_method")
 ship_fee = st.number_input("金額", min_value=0, step=100, key="ship_fee")
 
-# ===== 開口別集計（見積書0用：最初のカーテン名・合計金額／定型句保持） =====
+# ===== 開口別集計（見積書0用） =====
 def split_by_opening(items: list[dict]):
     by_op = {}
     for it in items:
@@ -695,7 +713,6 @@ def split_by_opening(items: list[dict]):
     return [by_op[k] for k in sorted(by_op.keys())]
 
 def opening_summary(opening_items: list[dict]):
-    # A列: 最初のカーテン品名（S・MAC or エア・セーブ*）、H列: 間口合計（メモ除く）
     curtain_name = ""
     total = 0
     for it in opening_items:
@@ -704,7 +721,6 @@ def opening_summary(opening_items: list[dict]):
             curtain_name = it.get("品名","")
         if typ != "メモ":
             total += int(it.get("小計") or 0)
-    # 定型句（メモ）は後で明細末尾A列へ
     memos = [it.get("備考","") for it in opening_items if it.get("種別")=="メモ" and it.get("備考")]
     memo_text = " / ".join(memos) if memos else ""
     return curtain_name or "（カーテン未選択）", total, memo_text
@@ -716,7 +732,7 @@ def validate_before_export(items: list[dict], ship_method: str, ship_fee: int):
         errs.append("明細がありません。")
         return errs
 
-    # 梱包必須：S・MAC / エア・セーブMA が含まれる場合
+    # 梱包必須：S・MAC / エア・セーブMA を含む場合
     has_required = any(it.get("種別") in ["S・MAC","エア・セーブMA"] for it in items)
     if has_required and (not ship_method or int(ship_fee)<=0):
         errs.append("運賃・梱包は必須です。配送条件と金額を入力してください。")
@@ -730,17 +746,16 @@ def validate_before_export(items: list[dict], ship_method: str, ship_fee: int):
     # テンプレート存在＆必要シート
     need_sheets = ["見積書0","見積書1","見積書2","見積書3","見積書4","見積書5"]
     if not TEMPLATE_BOOK.exists():
-        errs.append("テンプレートがありません：見積書テンプレ.xlsx")
+        errs.append("テンプレートがありません：見積書（明細）.xlsx")
     else:
         try:
             wb = load_workbook(TEMPLATE_BOOK)
             for sn in need_sheets:
                 if sn not in wb.sheetnames:
-                    errs.append(f"テンプレートにシート『{sn}』がありません。")
+                    errs.append(f"テンプレート（見積書（明細）.xlsx）にシート『{sn}』がありません。")
         except Exception as e:
             errs.append(f"テンプレートを開けません: {e}")
 
-    # 総ページ>5 判定はレイアウト後にも再確認（ここでは概算チェック省略せず下で厳密算出）
     return errs
 
 # ===== Excel出力 =====
@@ -766,7 +781,6 @@ def export_to_template(out_path: str, items: list[dict], header: dict, ship_meth
         ws0[f"F{row}"] = 1
         ws0[f"G{row}"] = f"=H{row}"
         ws0[f"H{row}"] = total
-        # opening index は grp[0]["opening"] として保存
         opening_memos[grp[0].get("opening")] = memo_text
         row += 1
 
@@ -777,15 +791,13 @@ def export_to_template(out_path: str, items: list[dict], header: dict, ship_meth
         ws0[f"H{row}"] = int(ship_fee)
         row += 1
 
-    # 見積書1〜5：11行目は触らず、12〜44に流し込み（33行/ページ）
-    # 1間口≤33はページ跨ぎ禁止、>33は跨ぎ可。定型句は各間口末尾A列のみ出力。
+    # 見積書1〜5：11行目は触らず、12〜44（33行/頁）
     def lines_for_opening(grp: list[dict]):
         lines = []
         for it in grp:
             if it.get("種別") == "メモ":
                 continue
             lines.append((it.get("品名",""), it.get("数量",""), it.get("単位",""), it.get("単価","")))
-        # 定型句：末尾に A 列で1行（数量/単位/単価 空）
         memo_text = opening_memos.get(grp[0].get("opening"), "")
         if memo_text:
             lines.append((memo_text, "", "", ""))
@@ -796,13 +808,12 @@ def export_to_template(out_path: str, items: list[dict], header: dict, ship_meth
     # ページレイアウト
     PAGES = [wb[f"見積書{i}"] for i in range(1,6)]
     page_idx = 0
-    row_in_page = 12  # 12〜44
+    row_in_page = 12
     def new_page():
         nonlocal page_idx, row_in_page
         page_idx += 1
         row_in_page = 12
 
-    # 初期ページ
     page_idx = 0
     row_in_page = 12
 
@@ -811,31 +822,26 @@ def export_to_template(out_path: str, items: list[dict], header: dict, ship_meth
         if block_len == 0:
             continue
 
-        # 1間口<=33 はページ跨ぎ禁止：残り行数が足りなければ新しいページへ
+        # 1間口≤33 はページ跨ぎ禁止：残り行が不足すれば新ページへ
         if block_len <= 33 and (row_in_page + block_len - 1) > 44:
             new_page()
-        # 1間口>33 は跨ぎ可：そのまま書き始め、溢れたら次ページ継続
+        # 1間口>33 は跨ぎ可：溢れたら次ページ継続
         while op_lines:
             if page_idx >= len(PAGES):
                 raise RuntimeError("明細ページが5ページを超えました。")
             ws = PAGES[page_idx]
-            # このページに残っている行数
             remain = 44 - row_in_page + 1
             take = min(len(op_lines), remain)
             chunk, op_lines = op_lines[:take], op_lines[take:]
-            # 書き込み
             for a,f,g,h in chunk:
                 ws[f"A{row_in_page}"] = a
                 ws[f"F{row_in_page}"] = f
                 ws[f"G{row_in_page}"] = g
                 ws[f"H{row_in_page}"] = h
                 row_in_page += 1
-            # ページ満了・次ページへ
             if op_lines:
                 new_page()
-        # 次の間口は、行が残っていれば同一ページ続行（<=33 の場合もここまでで収まっている）
 
-    # 総ページチェック（実際に使用したページ数）
     used_pages = page_idx + (1 if row_in_page>12 else 0)
     if used_pages > 5:
         raise RuntimeError(f"明細ページが5ページを超えました（使用{used_pages}ページ）。")
@@ -843,7 +849,7 @@ def export_to_template(out_path: str, items: list[dict], header: dict, ship_meth
     os.makedirs(osp.dirname(out_path), exist_ok=True)
     wb.save(out_path)
 
-# ===== 保存UI（Excel転記のみ必須。CSVは任意で残す） =====
+# ===== 保存UI =====
 st.markdown("---")
 sec_title("保存")
 save_dir = "./data"; os.makedirs(save_dir, exist_ok=True)
@@ -854,7 +860,8 @@ with c1:
     st.text_input("保存ファイル名", value=st.session_state.file_title, key="file_title", disabled=not st.session_state.file_title_manual)
 
 with c2:
-    st.markdown("**Excel保存（見積書テンプレ.xlsx へ直接転記）**")
+    # (変更) 表示文言もテンプレ名に合わせる
+    st.markdown("**Excel保存（見積書（明細）.xlsx へ直接転記）**")
     if st.button("Excel保存（テンプレ転記）", key="excel_save_btn"):
         errs = validate_before_export(overall_items, st.session_state.get("ship_method",""), int(st.session_state.get("ship_fee") or 0))
         if errs:
@@ -862,12 +869,14 @@ with c2:
         else:
             try:
                 header = {
-                    "estimate_no":   st.session_state.get("estimate_no",""),
+                    # (変更) 見積番号は「弊社担当者番号-ベース」。未入力時はベースのみ。
+                    "estimate_no":   (f"{st.session_state.get('our_staff_code')}-" if st.session_state.get('our_staff_code') else "") + st.session_state.get("estimate_base",""),
                     "date":          (st.session_state.get("created_disp") or datetime.today().strftime("%Y/%m/%d")).replace("/","-"),
                     "customer_name": st.session_state.get("client",""),
                     "branch_name":   st.session_state.get("branch",""),
                     "office_name":   st.session_state.get("office",""),
-                    "person_name":   st.session_state.get("pic",""),
+                    # (変更) A8は得意先担当者（全角ひらがな）
+                    "person_name":   st.session_state.get("customer_pic",""),
                     "project_name":  st.session_state.get("pj",""),
                 }
                 out = osp.join(save_dir, f"{st.session_state.file_title}_見積書.xlsx")
