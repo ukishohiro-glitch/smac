@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-# main.py — 本番対応 完全版（修正反映）
+# main.py — 本番対応 完全版（2025-09 修正版）
 # 変更点：
-#  1) 得意先担当者は全角ひらがな入力。見積番号の先頭に弊社担当者番号（半角英数2〜3）を付与。
-#  2) Excelテンプレ名を「見積書（明細）.xlsx」に変更（見積書0〜5 への直接転記）。
-#  3) 部材入力の「＋」ボタンを各部材シート名の右横（同一行右端）に配置。
-#  4) 部材入力でラジオ選択時、同項目の他品名を「畳む」（空欄ボタンは残す／空欄に戻すと全候補再表示）。
+#  1) Excelテンプレート名を「お見積書（明細）.xlsx」に変更。
+#  2) エア・セーブME型の見積ロジック拡張：電動駆動部（単一選択）＋インテリジェントセンサー等のOP（複数選択）を
+#     「ME型OP」シートから読み込み、固定価格×数量で加算。カテゴリ列が無い場合は品名のキーワードで自動分類。
 
 import os, os.path as osp, secrets, math, re, unicodedata
 from datetime import datetime, date
@@ -15,7 +14,7 @@ from pathlib import Path
 
 # ===== パス =====
 APP_DIR = Path(__file__).parent
-TEMPLATE_BOOK = APP_DIR / "見積書（明細）.xlsx"     # ← (変更) テンプレファイル名
+TEMPLATE_BOOK = APP_DIR / "お見積書（明細）.xlsx"    # ← 修正：テンプレファイル名
 MASTER_BOOK   = APP_DIR / "master.xlsx"
 
 # ===== ユーティリティ =====
@@ -90,7 +89,7 @@ def load_master():
     df_mb_tbl   = R("MB型単価表")
     df_mc       = R("MC型単価表")
     df_me_curt  = read_xlsx(MASTER_BOOK, "ME型単価表")
-    df_me_motor = read_xlsx(MASTER_BOOK, "ME型OP")
+    df_me_motor = read_xlsx(MASTER_BOOK, "ME型OP")  # ← MEの駆動・センサー等
     df_op       = R("OP", ["OP名称","金額","方向"])
     df_gap      = R("隙間シート")
     parts_sheets = ["カーテンレール","取手付間仕切ポール","中間ポール","アルミ押えバー","間仕切ネットBOXバー","落し","その他"]
@@ -197,7 +196,7 @@ def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int,
 
 # ===== エア・セーブ／部材ヘルパ =====
 def pick_price_col(df: pd.DataFrame):
-    for c in ["㎡単価","平米単価","m2単価","単価","上代","価格","金額"]:
+    for c in ["㎡単価","平米単価","m2単価","単価","上代","価格","金額","固定価格"]:
         if c in df.columns: return c
     return None
 
@@ -211,7 +210,8 @@ def area_price(df_area: pd.DataFrame, item_name: str, perf: str, W: int, H: int,
     if unit_col is None: res["msg"] = "単価列が見つかりません。"; return res
 
     rows = df_area[df_area[name_col]==item_name]
-    if perf_col and perf: rows = rows[rows[perf_col]==perf]
+    if perf_col and perf: rows = rows[perf_col]==perf and df_area[df_area[name_col]==item_name]
+    rows = df_area[(df_area[name_col]==item_name) & ((df_area[perf_col]==perf) if perf_col and perf else True)]
     if rows.empty: res["msg"] = "対象行が見つかりません。"; return res
 
     unit = parse_float(rows.iloc[0][unit_col])
@@ -235,6 +235,40 @@ def fixed_price(df_fixed: pd.DataFrame, item_name: str) -> int:
     if row.empty: return 0
     v = parse_float(row.iloc[0][price_col])
     return int(ceil100(v)) if v else 0
+
+# ---- ME型OPの分類（カテゴリ列が無い場合のキーワード分類にも対応） ----
+def split_me_op(df_me_op: pd.DataFrame):
+    if df_me_op.empty: 
+        return [], []
+    name_col = pick_col(df_me_op, ["品名","製品名","名称"]) or df_me_op.columns[0]
+    cat_col  = pick_col(df_me_op, ["カテゴリ","区分","種別","category"])
+    names = df_me_op[name_col].dropna().astype(str).unique().tolist()
+
+    motor_kw = ("駆動","ﾄﾞﾗｲﾌﾞ","モータ","ﾓｰﾀ","電動","駆動部","ドライヴ","ドライブ","アクチュエータ","アクチュエーター")
+    sensor_kw = ("センサー","sensor","ｾﾝｻ","インテリ","intelli","人感","リモコン","remote","コントローラ","制御","制御盤","スイッチ","スイッチング")
+
+    motors, accs = [], []
+    for nm in names:
+        row = df_me_op[df_me_op[name_col]==nm].iloc[0]
+        if cat_col:
+            cat = str(row[cat_col]).lower()
+            if any(k in cat for k in ["駆動","motor","モータ","電動"]):
+                motors.append(nm); continue
+            if any(k in cat for k in ["sensor","センサ","ｾﾝｻ","インテリ","制御","スイッチ","remote"]):
+                accs.append(nm); continue
+        # カテゴリなし→名前で判定
+        low = nm.lower()
+        if any(k.lower() in low for k in motor_kw):
+            motors.append(nm)
+        elif any(k.lower() in low for k in sensor_kw):
+            accs.append(nm)
+        else:
+            # 分類できないものは付属品扱いに回す
+            accs.append(nm)
+    # 万一どちらかが0件の場合、全件アクセサリに
+    if not motors and names:
+        accs = names
+    return sorted(set(motors)), sorted(set(accs))
 
 PART_LENGTH_RULE = {
     "カーテンレール": "width",
@@ -342,7 +376,6 @@ def sec_title(text: str): st.markdown(f'<div class="sec-h">{text}</div>', unsafe
 
 # セッション
 if "seen_serials" not in st.session_state: st.session_state.seen_serials = set()
-# (変更) ベース番号を保持し、表示時に弊社担当者番号でプレフィックス連結
 if "estimate_base" not in st.session_state: st.session_state.estimate_base = generate_estimate_no(st.session_state.seen_serials)
 if "openings" not in st.session_state:    st.session_state.openings = [{"id":1}]
 if "file_title_manual" not in st.session_state: st.session_state.file_title_manual = False
@@ -363,12 +396,10 @@ with d3:
     offices = df_clients[(df_clients["社名"]==sel_client)&(df_clients["支店名"]==sel_branch)]["営業所名"].dropna().unique().tolist() if sel_client and sel_branch and "営業所名" in df_clients.columns else []
     sel_office = st.selectbox("営業所名", [""]+offices, key="office")
 with d4:
-    # (変更) 得意先担当者（全角ひらがな）
     person = st.text_input("担当者（得意先・全角ひらがな）", key="customer_pic")
     if person and not re.match(r"^[\u3041-\u3096ー\s]+$", person):
         st.error("担当者は全角ひらがなで入力してください。")
 
-# (変更) 弊社担当者番号（見積番号プレフィックス）
 k1,k2,k3 = st.columns([1.2,1.0,0.8])
 with k1:
     pj_name = st.text_input("物件名", key="pj")
@@ -390,7 +421,7 @@ st.markdown('<div class="hr-thin"></div>', unsafe_allow_html=True)
 st.markdown("</div>", unsafe_allow_html=True)
 
 # ===== サマリ用集計器 =====
-overall_items = []   # 画面表示用の全明細（アイテム単位）
+overall_items = []   # 画面表示用の全明細
 overall_total = 0
 def overall_total_update(v): 
     global overall_total
@@ -493,7 +524,7 @@ def render_opening(idx: int):
                 if st.checkbox(nm, key=pref+f"smac_op_{i}"):
                     picked_ops.append(df_op[df_op["OP名称"]==nm].iloc[0].to_dict())
 
-    # 計算→ overall_items に opening番号を含めて格納
+    # ===== 計算→ overall_items へ格納 =====
     if W>0 and H>0 and CNT>0:
         if large=="S・MACカーテン":
             sm = smac_estimate(middle or "", st.session_state.get(pref+"open") or "片引き",
@@ -507,10 +538,8 @@ def render_opening(idx: int):
                     "品名": "S・MACカーテン"
                             + (f" {middle}" if middle else "")
                             + (f" {st.session_state.get(pref+'open')}" if st.session_state.get(pref+'open') else ""),
-                    "数量": CNT,
-                    "単位": "式",
-                    "単価": sm["sell_one"],
-                    "小計": sm["sell_total"],
+                    "数量": CNT, "単位": "式",
+                    "単価": sm["sell_one"], "小計": sm["sell_total"],
                     "種別": "S・MAC",
                     "備考": (f"符号:{mark}／" if mark else "") + note
                 })
@@ -526,7 +555,8 @@ def render_opening(idx: int):
                         "opening": idx,
                         "品名": f"エア・セーブ MA型折りたたみ式 {air_item}",
                         "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["total"],
-                        "種別":"エア・セーブMA", "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
+                        "種別":"エア・セーブMA",
+                        "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
                     })
                     overall_total_update(r["total"])
 
@@ -566,6 +596,7 @@ def render_opening(idx: int):
 
             elif air_type=="ME" and perf:
                 total_me = 0
+                # ① カーテン（㎡単価）
                 if air_item:
                     curt_df = df_me_curt.copy() if not df_me_curt.empty else df_mc.copy()
                     r = area_price(curt_df, air_item, perf, W, H, CNT)
@@ -578,20 +609,54 @@ def render_opening(idx: int):
                             "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
                         })
                         total_me += r["total"]
-                if st.session_state.get(pref+"me_motor"):
-                    mu = fixed_price(df_me_motor, st.session_state[pref+"me_motor"])
+
+                # ② ME型OP（駆動部：単一選択／センサー・コントローラ等：複数選択）
+                motors, accs = split_me_op(df_me_motor)
+                op_name_col = pick_col(df_me_motor, ["品名","製品名","名称"]) or (df_me_motor.columns[0] if not df_me_motor.empty else None)
+
+                # 駆動部（セレクトボックス）
+                me_motor_sel = ""
+                if motors:
+                    me_motor_sel = st.selectbox("ME：電動駆動部（必須1つ）", [""]+motors, key=pref+"me_motor")
+                # アクセサリ（チェックボックス複数）
+                acc_selected = []
+                if accs:
+                    st.caption("ME：インテリジェントセンサー／リモコン／制御ほか（複数選択可）")
+                    acc_cols = st.columns(3)
+                    for i, nm in enumerate(accs):
+                        with acc_cols[i%3]:
+                            if st.checkbox(nm, key=pref+f"me_acc_{i}"):
+                                acc_selected.append(nm)
+
+                # 駆動部の価格
+                if me_motor_sel:
+                    mu = fixed_price(df_me_motor, me_motor_sel)
                     if mu>0:
                         overall_items.append({
                             "opening": idx,
-                            "品名": f"エア・セーブ ME型電動式 駆動部 {st.session_state[pref+'me_motor']}",
+                            "品名": f"エア・セーブ ME型電動式 駆動部 {me_motor_sel}",
                             "数量": CNT, "単位":"式", "単価": mu, "小計": mu*CNT,
                             "種別":"エア・セーブME(駆動部)", "備考": ""
                         })
                         total_me += mu*CNT
+
+                # アクセサリの価格（合計）
+                if acc_selected:
+                    for nm in acc_selected:
+                        pv = fixed_price(df_me_motor, nm)
+                        if pv>0:
+                            overall_items.append({
+                                "opening": idx,
+                                "品名": f"エア・セーブ ME型OP {nm}",
+                                "数量": CNT, "単位":"式", "単価": pv, "小計": pv*CNT,
+                                "種別":"エア・セーブME(OP)", "備考": ""
+                            })
+                            total_me += pv*CNT
+
                 if total_me>0:
                     overall_total_update(total_me)
 
-    # 部材（開閉方式や大分類に応じて表示）
+    # ===== 部材入力（S・MAC または エア・セーブMAで表示） =====
     show_parts = (
         st.session_state.get(pref+"large")=="S・MACカーテン" or
         (st.session_state.get(pref+"large")=="エア・セーブ" and (st.session_state.get(pref+"airtype") or "").startswith("MA"))
@@ -603,7 +668,7 @@ def render_opening(idx: int):
             if rows_key not in st.session_state:
                 st.session_state[rows_key] = [{"item":"", "qty":1}]
 
-            # (変更) 「＋」を各シート名の右横（同一行右端）に配置しやすい比率
+            # 「＋」を各シート名の右横（同一行右端）
             hcol1, hcol2 = st.columns([0.86, 0.14])
             with hcol1: st.caption(f"【{sheet_name}】")
             with hcol2:
@@ -617,7 +682,7 @@ def render_opening(idx: int):
                 st.markdown('<div class="row-compact">', unsafe_allow_html=True)
                 col1, col2, col3, col4, col5 = st.columns([1.4,0.45,0.7,0.8,0.28])
                 with col1:
-                    # (変更) ラジオ：選択済みなら「空欄」と「選択中」のみ表示、未選択なら全候補
+                    # ラジオ：選択済みなら「空欄」と「選択中」のみ表示、未選択なら全候補
                     all_item_opts = names
                     current = rowdata["item"] if rowdata["item"] in ([""] + all_item_opts) else ""
                     item_opts = [""] + ([current] if current else all_item_opts)
@@ -687,7 +752,6 @@ if st.button("＋ 間口を追加", key="add_opening"):
 
 # ===== サマリ表示（画面） =====
 st.markdown("---")
-def sec_title(text: str): st.markdown(f'<div class="sec-h">{text}</div>', unsafe_allow_html=True)
 sec_title("見積サマリ")
 if overall_items:
     df_summary = pd.DataFrame(overall_items, columns=["opening","品名","数量","単位","単価","小計","種別","備考"])
@@ -737,7 +801,7 @@ def validate_before_export(items: list[dict], ship_method: str, ship_fee: int):
     if has_required and (not ship_method or int(ship_fee)<=0):
         errs.append("運賃・梱包は必須です。配送条件と金額を入力してください。")
 
-    # 見積書0行数（間口数 + 運賃行）が 24 行以内
+    # 見積書0行数（間口数 + 運賃行）≤ 24
     groups = split_by_opening(items)
     line_count = len(groups) + (1 if ship_method else 0)
     if line_count > 24:
@@ -746,16 +810,15 @@ def validate_before_export(items: list[dict], ship_method: str, ship_fee: int):
     # テンプレート存在＆必要シート
     need_sheets = ["見積書0","見積書1","見積書2","見積書3","見積書4","見積書5"]
     if not TEMPLATE_BOOK.exists():
-        errs.append("テンプレートがありません：見積書（明細）.xlsx")
+        errs.append("テンプレートがありません：お見積書（明細）.xlsx")
     else:
         try:
             wb = load_workbook(TEMPLATE_BOOK)
             for sn in need_sheets:
                 if sn not in wb.sheetnames:
-                    errs.append(f"テンプレート（見積書（明細）.xlsx）にシート『{sn}』がありません。")
+                    errs.append(f"テンプレート（お見積書（明細）.xlsx）にシート『{sn}』がありません。")
         except Exception as e:
             errs.append(f"テンプレートを開けません: {e}")
-
     return errs
 
 # ===== Excel出力 =====
@@ -821,11 +884,10 @@ def export_to_template(out_path: str, items: list[dict], header: dict, ship_meth
         block_len = len(op_lines)
         if block_len == 0:
             continue
-
-        # 1間口≤33 はページ跨ぎ禁止：残り行が不足すれば新ページへ
+        # 1間口≤33 はページ跨ぎ禁止：残り行不足なら新ページへ
         if block_len <= 33 and (row_in_page + block_len - 1) > 44:
             new_page()
-        # 1間口>33 は跨ぎ可：溢れたら次ページ継続
+        # 1間口>33 は跨ぎ可：溢れたら次ページ
         while op_lines:
             if page_idx >= len(PAGES):
                 raise RuntimeError("明細ページが5ページを超えました。")
@@ -860,8 +922,7 @@ with c1:
     st.text_input("保存ファイル名", value=st.session_state.file_title, key="file_title", disabled=not st.session_state.file_title_manual)
 
 with c2:
-    # (変更) 表示文言もテンプレ名に合わせる
-    st.markdown("**Excel保存（見積書（明細）.xlsx へ直接転記）**")
+    st.markdown("**Excel保存（お見積書（明細）.xlsx へ直接転記）**")
     if st.button("Excel保存（テンプレ転記）", key="excel_save_btn"):
         errs = validate_before_export(overall_items, st.session_state.get("ship_method",""), int(st.session_state.get("ship_fee") or 0))
         if errs:
@@ -869,13 +930,11 @@ with c2:
         else:
             try:
                 header = {
-                    # (変更) 見積番号は「弊社担当者番号-ベース」。未入力時はベースのみ。
                     "estimate_no":   (f"{st.session_state.get('our_staff_code')}-" if st.session_state.get('our_staff_code') else "") + st.session_state.get("estimate_base",""),
                     "date":          (st.session_state.get("created_disp") or datetime.today().strftime("%Y/%m/%d")).replace("/","-"),
                     "customer_name": st.session_state.get("client",""),
                     "branch_name":   st.session_state.get("branch",""),
                     "office_name":   st.session_state.get("office",""),
-                    # (変更) A8は得意先担当者（全角ひらがな）
                     "person_name":   st.session_state.get("customer_pic",""),
                     "project_name":  st.session_state.get("pj",""),
                 }
