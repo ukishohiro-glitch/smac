@@ -1,11 +1,16 @@
 # -*- coding: utf-8 -*-
-# main.py — 本番対応 完全版（2025-09 修正版）
-# 直近の変更:
-#  A) 部材の「＋」ボタンを見出しの左側に配置（要望済のまま）
-#  B) エア・セーブME型の駆動部/センサーOP見積ロジック実装（要望済のまま）
-#  C) Excel結合セルに安全書き込み（write_merged_safe）で J3 等エラー解消（要望済のまま）
-#  D) テンプレ名：「お見積書（明細）.xlsx」（要望済のまま）
-#  E) S・MAC原価明細は「UIのみ（折りたたみ表示）」に変更。※Excelへは絶対に書き出さない（新規修正）
+# main.py — 本番対応 完全版（更新：寸法行/定型句/空行/運賃表記）
+# 変更点（今回）:
+#  1) 見積サマリ＆Excel明細の表示仕様
+#     - S・MAC: 品名行の下に「間口寸法」行＆「カーテン寸法」行を追加。
+#               数量/単位/単価/小計は「カーテン寸法」行に記載（品名行は空欄、間口寸法行も空欄）。
+#     - エア・セーブ: 品名行の下に「間口寸法」行を追加。
+#               数量/単位/単価/小計は「間口寸法」行に記載（品名行は空欄）。
+#  2) 定型句は「間口ごと」に選択（既存仕様のままですが内部キーを厳密化）。
+#  3) 複数間口の場合、Excel明細で間口ブロック間に1行の空行を自動挿入
+#     （定型句があればその直下に空行）。
+#  4) 運賃ラベルを「路線便（時間指定不可）」「現場搬入（時間指定可）」に変更
+#     → サマリ(見積書0)の表記も同一。
 
 import os, os.path as osp, secrets, math, re, unicodedata
 from datetime import datetime, date
@@ -113,11 +118,13 @@ def extract_thickness(text: str) -> float | None:
 
 def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int,
                   df_gen: pd.DataFrame, df_op: pd.DataFrame, picked_ops: list[dict]):
+    """S・MAC販売額と、実使用のカーテン寸法（mm）を返す"""
     HEM_UNIT_THIN = 450
     HEM_UNIT_THICK = 550
     SEAM_UNIT_PER_M = 300
 
-    res = {"ok": False, "msg": "", "sell_one": 0, "sell_total": 0, "note_ops": [], "breakdown": {}}
+    res = {"ok": False, "msg": "", "sell_one": 0, "sell_total": 0,
+           "note_ops": [], "breakdown": {}, "curtain_w": None, "curtain_h": None}
     if not middle_name or W<=0 or H<=0 or cnt<=0 or df_gen.empty:
         res["msg"] = "S・MAC：中分類/寸法/数量/原反価格を確認してください。"
         return res
@@ -146,6 +153,8 @@ def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int,
     else:
         cur_w = (W/2) * 1.05; panels = 2
     cur_h = H + 50
+    res["curtain_w"] = int(round(cur_w))
+    res["curtain_h"] = int(round(cur_h))
 
     length_per_panel_m = (cur_h * 1.2) / 1000.0
     joints = math.ceil(cur_w / gen_width)
@@ -416,7 +425,7 @@ st.markdown('<div class="hr-thin"></div>', unsafe_allow_html=True)
 st.markdown("</div>", unsafe_allow_html=True)
 
 # ===== サマリ用集計器 =====
-overall_items = []   # 画面表示用の全明細
+overall_items = []   # 画面表示用の全明細（寸法行なども含む）
 overall_total = 0
 def overall_total_update(v): 
     global overall_total
@@ -488,7 +497,7 @@ def render_opening(idx: int):
                 items = df_ma[name_col].dropna().unique().tolist() if name_col else []
                 air_item = st.selectbox("エア・セーブ品名", [""]+items, key=pref+"ma_item")
             elif air_type=="MB":
-                name_col = pick_col(df_mb_tbl, ["品名","製品名","名称","品番","型式"]) or (df_mb_tbl.columns[0] if not df_mb.empty else None)
+                name_col = pick_col(df_mb_tbl, ["品名","製品名","名称","品番","型式"]) or (df_mb_tbl.columns[0] if not df_mb_tbl.empty else None)
                 items = df_mb_tbl[name_col].dropna().unique().tolist() if name_col else []
                 air_item = st.selectbox("エア・セーブ品名", [""]+items, key=pref+"mb_item")
             elif air_type=="MC":
@@ -525,21 +534,37 @@ def render_opening(idx: int):
             sm = smac_estimate(middle or "", st.session_state.get(pref+"open") or "片引き",
                                W, H, CNT, df_gen, df_op, picked_ops)
             if sm["ok"]:
-                note = f"W{W}×H{H}mm"
-                if sm["note_ops"]: note += "／OP：" + "・".join(sm["note_ops"])
-                # 販売行（＝Excelへ出すのはこの行だけ）
+                # 行1: 品名（数量/単価は空）
+                title = "S・MACカーテン"
+                if middle: title += f" {middle}"
+                if st.session_state.get(pref+'open'): title += f" {st.session_state.get(pref+'open')}"
                 overall_items.append({
                     "opening": idx,
-                    "品名": "S・MACカーテン"
-                            + (f" {middle}" if middle else "")
-                            + (f" {st.session_state.get(pref+'open')}" if st.session_state.get(pref+'open') else ""),
+                    "品名": title,
+                    "数量": "", "単位": "", "単価": "", "小計": 0,
+                    "種別": "S・MAC",
+                    "備考": (f"符号:{mark}" if mark else "")
+                })
+                # 行2: 間口寸法（空欄）
+                overall_items.append({
+                    "opening": idx,
+                    "品名": f"間口寸法：W{W}×H{H}mm",
+                    "数量": "", "単位": "", "単価": "", "小計": 0,
+                    "種別": "寸法",
+                    "備考": ""
+                })
+                # 行3: カーテン寸法（ここに数量/単価/小計）
+                overall_items.append({
+                    "opening": idx,
+                    "品名": f"カーテン寸法：W{sm['curtain_w']}×H{sm['curtain_h']}mm",
                     "数量": CNT, "単位": "式",
                     "単価": sm["sell_one"], "小計": sm["sell_total"],
-                    "種別": "S・MAC",
-                    "備考": (f"符号:{mark}／" if mark else "") + note
+                    "種別": "寸法",
+                    "備考": ("OP：" + "・".join(sm["note_ops"])) if sm["note_ops"] else ""
                 })
                 overall_total_update(sm["sell_total"])
-                # ★ UIのみ：原価明細（折りたたみ）。Excelへは書き出さない。
+
+                # UIのみの原価明細
                 with st.expander(f"間口 {idx}：S・MAC 原価明細（UI表示のみ・Excel非出力）", expanded=False):
                     bd = sm["breakdown"]
                     df_bd = pd.DataFrame([
@@ -556,71 +581,82 @@ def render_opening(idx: int):
                 st.warning(sm.get("msg") or "S・MACの計算に失敗しました。")
 
         elif large=="エア・セーブ" and air_type:
+            # 共通ヘルパ：品名行＋間口寸法行（価格は寸法行へ）
+            def push_two_lines(title, price_one, total, note_extra=""):
+                # 行1: 品名（空）
+                overall_items.append({
+                    "opening": idx,
+                    "品名": title,
+                    "数量": "", "単位":"", "単価":"", "小計": 0,
+                    "種別": f"エア・セーブ{air_type}",
+                    "備考": (f"符号:{mark}" if mark else "")
+                })
+                # 行2: 間口寸法（ここに価格）
+                overall_items.append({
+                    "opening": idx,
+                    "品名": f"間口寸法：W{W}×H{H}mm",
+                    "数量": CNT, "単位":"式", "単価": price_one, "小計": total,
+                    "種別": "寸法", "備考": note_extra
+                })
+                overall_total_update(total)
+
             if air_type=="MA" and air_item and perf:
                 r = area_price(df_ma, air_item, perf, W, H, CNT)
                 if r["ok"]:
-                    overall_items.append({
-                        "opening": idx,
-                        "品名": f"エア・セーブ MA型折りたたみ式 {air_item}",
-                        "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["total"],
-                        "種別":"エア・セーブMA",
-                        "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
-                    })
-                    overall_total_update(r["total"])
+                    title = f"エア・セーブ MA型折りたたみ式 {air_item}"
+                    push_two_lines(title, r["price_one"], r["total"])
 
             elif air_type=="MB" and air_item and perf:
                 r = area_price(df_mb_tbl, air_item, perf, W, H, CNT)
                 if r["ok"]:
-                    overall_items.append({
-                        "opening": idx,
-                        "品名": f"エア・セーブ MB型固定式 {air_item}",
-                        "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["total"],
-                        "種別":"エア・セーブMB",
-                        "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
-                                 + (f"／{st.session_state.get(pref+'rib')}" if st.session_state.get(pref+'rib') else "")
-                    })
-                    overall_total_update(r["total"])
+                    title = f"エア・セーブ MB型固定式 {air_item}"
+                    note = (f"{st.session_state.get(pref+'rib')}" if st.session_state.get(pref+'rib') else "")
+                    push_two_lines(title, r["price_one"], r["total"], note)
 
             elif air_type=="MC" and air_item and perf:
                 r = area_price(df_mc, air_item, perf, W, H, CNT)
                 if r["ok"]:
+                    # カーテン本体（2行構成）
+                    title = f"エア・セーブ MC型スライド式 {air_item}"
+                    note = " / ".join([x for x in [
+                        st.session_state.get(pref+'rib'),
+                        st.session_state.get(pref+'open')
+                    ] if x])
+                    push_two_lines(title, r["price_one"], r["price_one"]*CNT, note)
+                    # レールは従来通り単独行（寸法行は付けない）
                     rail = mc_slide_rail_price(W, CNT)
-                    total = r["total"] + rail
-                    overall_items.append({
-                        "opening": idx,
-                        "品名": f"エア・セーブ MC型スライド式 {air_item}",
-                        "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["price_one"]*CNT,
-                        "種別":"エア・セーブMC",
-                        "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
-                                 + (f"／{st.session_state.get(pref+'rib')}" if st.session_state.get(pref+'rib') else "")
-                                 + (f"／{st.session_state.get(pref+'open')}" if st.session_state.get(pref+'open') else "")
-                    })
                     overall_items.append({
                         "opening": idx,
                         "品名": "スライドレール", "数量": 1, "単位":"式", "単価": rail, "小計": rail,
                         "種別":"エア・セーブMC", "備考": "W×2を2000mm刻み"
                     })
-                    overall_total_update(total)
+                    overall_total_update(rail)
 
             elif air_type=="ME" and perf:
                 total_me = 0
-                # ① カーテン（㎡単価）
+                # ① カーテン（2行構成）
                 if air_item:
                     curt_df = df_me_curt.copy() if not df_me_curt.empty else df_mc.copy()
                     r = area_price(curt_df, air_item, perf, W, H, CNT)
                     if r["ok"]:
+                        title = f"エア・セーブ ME型電動式 カーテン {air_item}"
                         overall_items.append({
                             "opening": idx,
-                            "品名": f"エア・セーブ ME型電動式 カーテン {air_item}",
-                            "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["total"],
+                            "品名": title,
+                            "数量": "", "単位":"", "単価":"", "小計": 0,
                             "種別":"エア・セーブME(カーテン)",
-                            "備考": (f"符号:{mark}／" if mark else "") + f"W{W}×H{H}mm"
+                            "備考": (f"符号:{mark}" if mark else "")
+                        })
+                        overall_items.append({
+                            "opening": idx,
+                            "品名": f"間口寸法：W{W}×H{H}mm",
+                            "数量": CNT, "単位":"式", "単価": r["price_one"], "小計": r["total"],
+                            "種別":"寸法", "備考": ""
                         })
                         total_me += r["total"]
 
-                # ② ME型OP（駆動部：単一選択／センサー・コントローラ等：複数選択）
+                # ② ME型OP（駆動部：単一選択／センサー等：複数選択）
                 motors, accs = split_me_op(df_me_motor)
-
                 me_motor_sel = ""
                 if motors:
                     me_motor_sel = st.selectbox("ME：電動駆動部（必須1つ）", [""]+motors, key=pref+"me_motor")
@@ -723,32 +759,27 @@ def render_opening(idx: int):
                         overall_total_update(subtotal)
             st.session_state[rows_key] = updated_rows
 
-                # 定型文（間口末尾A列へ1行で出力）
+        # 定型文（間口末尾A列へ1行で出力）: 間口ごと
         st.markdown("##### 定型文")
         phr_sel = []
         colL, colR = st.columns(2)
-        half = (len(PHRASES) + 1) // 2
+        half = (len(PHRASES)+1)//2
         with colL:
             for i, p in enumerate(PHRASES[:half]):
-                if st.checkbox(p, key=pref + f"phr_L_{i}"):
+                if st.checkbox(p, key=pref+f"phr_L_{i}"):
                     phr_sel.append(p)
         with colR:
             for i, p in enumerate(PHRASES[half:]):
-                if st.checkbox(p, key=pref + f"phr_R_{i}"):
+                if st.checkbox(p, key=pref+f"phr_R_{i}"):
                     phr_sel.append(p)
-
-        # ← with の外で 1 項目 = 1 行 で明細化（インデント注意）
         if phr_sel:
             for p in phr_sel:
                 overall_items.append({
                     "opening": idx,
                     "品名": "（定型文）",
-                    "数量": "", "単位": "", "単価": "", "小計": 0,
-                    "種別": "メモ",
+                    "数量": "", "単位":"", "単価":"", "小計":0, "種別":"メモ",
                     "備考": p
                 })
-
-
     else:
         st.caption("※このカーテン構成では部材の追加は行いません。")
 
@@ -777,7 +808,7 @@ st.metric("税抜合計", f"¥{overall_total:,}")
 # ===== 運賃・梱包 =====
 st.markdown("---")
 sec_title("運賃・梱包")
-ship_method = st.radio("配送条件", ["","路線便時間指定不可","現場搬入時間指定可"], horizontal=True, key="ship_method")
+ship_method = st.radio("配送条件", ["","路線便（時間指定不可）","現場搬入（時間指定可）"], horizontal=True, key="ship_method")
 ship_fee = st.number_input("金額", min_value=0, step=100, key="ship_fee")
 
 # ===== 開口別集計（見積書0用） =====
@@ -793,6 +824,7 @@ def opening_summary(opening_items: list[dict]):
     total = 0
     for it in opening_items:
         typ = it.get("種別","")
+        # 最初に出てくる品名行（S・MAC/エア・セーブ）をA列名に使う
         if not curtain_name and (typ.startswith("S・MAC") or typ.startswith("エア・セーブ")):
             curtain_name = it.get("品名","")
         if typ != "メモ":
@@ -858,11 +890,11 @@ def export_to_template(out_path: str, items: list[dict], header: dict, ship_meth
     write_merged_safe(ws0, "A8", header["person_name"])
     write_merged_safe(ws0, "B17", header["project_name"])
 
-        # 見積書0：21〜 に間口合計（A/F/G/H）→ 末尾に運賃梱包（空行なし）
+    # 見積書0：21〜 に間口合計（A/F/G/H）→ 末尾に運賃梱包（空行なし）
     row = 21
     opening_groups = split_by_opening(items)
     for grp in opening_groups:
-        name, total, _ = opening_summary(grp)  # 定型文まとめは使わない
+        name, total, _ = opening_summary(grp)
         ws0[f"A{row}"] = name
         ws0[f"F{row}"] = 1
         ws0[f"G{row}"] = f"=H{row}"
@@ -879,26 +911,29 @@ def export_to_template(out_path: str, items: list[dict], header: dict, ship_meth
     # 見積書1〜5：11行目は触らず、12〜44（33行/頁）
     def lines_for_opening(grp: list[dict]):
         lines = []
-        # 先に通常行（品名・数量・単位・単価）
+        # 通常行（品名・数量・単位・単価）…「メモ」以外はすべて出す（寸法行含む）
         for it in grp:
             if it.get("種別") != "メモ":
                 lines.append((
-                    it.get("品名", ""),
-                    it.get("数量", ""),
-                    it.get("単位", ""),
-                    it.get("単価", ""),
+                    it.get("品名",""),
+                    it.get("数量",""),
+                    it.get("単位",""),
+                    it.get("単価",""),
                 ))
-        # 後ろにメモ行（定型句 1 項目 = 1 行）
+        # メモ行（定型句は1項目=1行）
         for it in grp:
             if it.get("種別") == "メモ":
-                txt = it.get("備考", "")
+                txt = it.get("備考","")
                 if txt:
                     lines.append((txt, "", "", ""))
         return lines
 
-    all_opening_lines = [lines_for_opening(grp) for grp in opening_groups]
+    blocks = [lines_for_opening(grp) for grp in opening_groups]
+    # 間口間に空行を1つ挿入（最後以外）
+    for bi in range(len(blocks)-1):
+        blocks[bi].append(("", "", "", ""))
 
-    PAGES = [wb[f"見積書{i}"] for i in range(1, 6)]
+    PAGES = [wb[f"見積書{i}"] for i in range(1,6)]
     page_idx = 0
     row_in_page = 12
 
@@ -907,7 +942,7 @@ def export_to_template(out_path: str, items: list[dict], header: dict, ship_meth
         page_idx += 1
         row_in_page = 12
 
-    for op_lines in all_opening_lines:
+    for op_lines in blocks:
         block_len = len(op_lines)
         if block_len == 0:
             continue
@@ -936,7 +971,6 @@ def export_to_template(out_path: str, items: list[dict], header: dict, ship_meth
 
     os.makedirs(osp.dirname(out_path), exist_ok=True)
     wb.save(out_path)
-
 
 # ===== 保存UI =====
 st.markdown("---")
