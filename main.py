@@ -11,6 +11,7 @@
 #  - 運賃：表記を「路線便（時間指定不可）」「現場搬入（時間指定可）」に統一
 #  - S・MAC原価明細：UIの折りたたみ表示のみ、Excel へは絶対に出力しない
 #  - 見積番号：3709-xxxxx 固定、担当者番号は別欄（2〜3桁英数）、得意先担当者は全角ひらがな
+#  - Excel保存と同時に PDF 書き出し（A4縦／余白：上0・下0・右0・左15mm／各シート1ページ（縮小））
 
 import os, os.path as osp, secrets, math, re, unicodedata
 from datetime import datetime, date
@@ -81,6 +82,10 @@ def read_xlsx(path: str, sheet: str | None = None) -> pd.DataFrame:
         return norm_cols(df)
     except Exception:
         return pd.DataFrame()
+
+# 1 mm -> points（Excelの余白単位）
+def mm_to_points(mm: float) -> float:
+    return float(mm) * 72.0 / 25.4
 
 # ===== マスタ読込 =====
 def load_master():
@@ -932,7 +937,7 @@ def validate_before_export(items: list[dict], ship_method: str, ship_fee: int):
             errs.append(f"テンプレートを開けません: {e}")
     return errs
 
-# ===== Excel出力 =====
+# ===== Excel出力（使用ページ数を返す） =====
 def export_to_template(out_path: str, items: list[dict], header: dict, ship_method: str, ship_fee: int):
     wb = load_workbook(TEMPLATE_BOOK)
     ws0 = wb["見積書0"]
@@ -1026,6 +1031,75 @@ def export_to_template(out_path: str, items: list[dict], header: dict, ship_meth
 
     os.makedirs(osp.dirname(out_path), exist_ok=True)
     wb.save(out_path)
+    # 使用した明細ページ数を返却
+    return used_pages
+
+# ===== Excel（COM）でPDF書き出し =====
+def export_pdf_with_excel(excel_path: str, pdf_path: str, used_detail_pages: int,
+                          left_mm: float = 15.0, top_mm: float = 0.0, right_mm: float = 0.0, bottom_mm: float = 0.0,
+                          portrait: bool = True, fit_one_page: bool = True):
+    """
+    excel_path のブックから、「見積書0」+「見積書1..N(=used_detail_pages)」をまとめてPDF化
+    - 余白：mm 指定
+    - A4／縦固定
+    - 各シート 1 ページに縮小（FitToPagesWide=1, FitToPagesTall=1）
+    """
+    try:
+        import win32com.client as win32  # pywin32
+        from win32com.client import constants as xl
+    except Exception as e:
+        raise RuntimeError("pywin32 が必要です。Windows + Excel 環境で 'pip install pywin32' を実行してください。") from e
+
+    excel = None
+    try:
+        excel = win32.gencache.EnsureDispatch("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
+
+        wb = excel.Workbooks.Open(osp.abspath(excel_path))
+        # 対象シートを収集
+        sheet_names = ["見積書0"] + [f"見積書{i}" for i in range(1, used_detail_pages+1)]
+        sheets = []
+        for sn in sheet_names:
+            try:
+                sheets.append(wb.Worksheets(sn))
+            except Exception:
+                pass
+
+        if not sheets:
+            wb.Close(SaveChanges=False)
+            raise RuntimeError("PDF化対象シートが見つかりません。")
+
+        # ページ設定を一括適用
+        for ws in sheets:
+            ps = ws.PageSetup
+            ps.PaperSize   = 9  # xlPaperA4
+            ps.Orientation = 1 if portrait else 2  # 1=xlPortrait, 2=xlLandscape
+            ps.LeftMargin   = mm_to_points(left_mm)
+            ps.RightMargin  = mm_to_points(right_mm)
+            ps.TopMargin    = mm_to_points(top_mm)
+            ps.BottomMargin = mm_to_points(bottom_mm)
+            ps.HeaderMargin = mm_to_points(0)
+            ps.FooterMargin = mm_to_points(0)
+            if fit_one_page:
+                ps.Zoom = False
+                ps.FitToPagesWide = 1
+                ps.FitToPagesTall = 1
+
+        # 複数シート選択 → まとめて PDF
+        wb.Worksheets([ws.Name for ws in sheets]).Select()
+        wb.ActiveSheet.ExportAsFixedFormat(
+            Type=0,  # xlTypePDF
+            Filename=osp.abspath(pdf_path),
+            Quality=0,  # xlQualityStandard
+            IncludeDocProperties=True,
+            IgnorePrintAreas=False,
+            OpenAfterPublish=False
+        )
+        wb.Close(SaveChanges=False)
+    finally:
+        if excel is not None:
+            excel.Quit()
 
 # ===== 保存UI =====
 st.markdown("---")
@@ -1038,7 +1112,7 @@ with c1:
     st.text_input("保存ファイル名", value=st.session_state.file_title, key="file_title", disabled=not st.session_state.file_title_manual)
 
 with c2:
-    st.markdown("**Excel保存（お見積書（明細）.xlsx へ直接転記）**")
+    st.markdown("**Excel保存（お見積書（明細）.xlsx へ直接転記）＋ PDF作成**")
     if st.button("Excel保存（テンプレ転記）", key="excel_save_btn"):
         errs = validate_before_export(overall_items, st.session_state.get("ship_method",""), int(st.session_state.get("ship_fee") or 0))
         if errs:
@@ -1054,14 +1128,56 @@ with c2:
                     "person_name":   st.session_state.get("customer_pic",""),
                     "project_name":  st.session_state.get("pj",""),
                 }
-                out = osp.join(save_dir, f"{st.session_state.file_title}_見積書.xlsx")
-                export_to_template(out, overall_items, header, st.session_state.get("ship_method",""), int(st.session_state.get("ship_fee") or 0))
-                st.success(f"Excelを保存しました：{out}")
-                with open(out, "rb") as f:
-                    st.download_button("ダウンロード", f.read(),
-                        file_name=os.path.basename(out),
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="excel_dl_btn")
+
+                # ===== ファイル名（ご要望に合わせて） =====
+                # Excel： mmdd物件名.xlsx で保存
+                excel_filename = f"{st.session_state.file_title}.xlsx"
+                excel_out = osp.join(save_dir, excel_filename)
+
+                # PDF： mmdd物件名様向けお見積書.pdf
+                pdf_filename = f"{st.session_state.file_title}様向けお見積書.pdf"
+                pdf_out = osp.join(save_dir, pdf_filename)
+
+                # ===== Excel転記（使用明細ページ数を受け取る） =====
+                used_pages = export_to_template(excel_out, overall_items, header,
+                                                st.session_state.get("ship_method",""), int(st.session_state.get("ship_fee") or 0))
+                st.success(f"Excelを保存しました：{excel_out}")
+
+                # ===== PDF化（Excel COM, A4縦／余白 上0・下0・右0・左15mm／各シート1ページ）=====
+                try:
+                    export_pdf_with_excel(
+                        excel_path=excel_out,
+                        pdf_path=pdf_out,
+                        used_detail_pages=used_pages,
+                        left_mm=15.0, top_mm=0.0, right_mm=0.0, bottom_mm=0.0,
+                        portrait=True, fit_one_page=True
+                    )
+                    st.success(f"PDFを作成しました：{pdf_out}")
+                except Exception as pe:
+                    st.error("PDFの作成に失敗しました（Windows + Excel + pywin32 が必要です）。")
+                    st.exception(pe)
+
+                # ===== ダウンロードボタン（PC/スマホ共通） =====
+                # Excel
+                try:
+                    with open(excel_out, "rb") as f:
+                        st.download_button("Excelダウンロード", f.read(),
+                            file_name=osp.basename(excel_out),
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="excel_dl_btn")
+                except Exception:
+                    pass
+
+                # PDF
+                try:
+                    with open(pdf_out, "rb") as f:
+                        st.download_button("PDFダウンロード", f.read(),
+                            file_name=osp.basename(pdf_out),
+                            mime="application/pdf",
+                            key="pdf_dl_btn")
+                except Exception:
+                    pass
+
             except Exception as e:
-                st.error("Excel出力でエラーが発生しました。")
+                st.error("Excel/PDF出力でエラーが発生しました。")
                 st.exception(e)
