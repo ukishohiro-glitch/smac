@@ -732,17 +732,20 @@ def render_opening(idx: int):
             for i, p in enumerate(PHRASES[:half]):
                 if st.checkbox(p, key=pref+f"phr_L_{i}"): phr_sel.append(p)
         with colR:
-            for i, p in enumerate(PHRASES[half:]):
-                if st.checkbox(p, key=pref+f"phr_R_{i}"): phr_sel.append(p)
-                if phr_sel:
-            for p in phr_sel:
-                overall_items.append({
-                    "opening": idx,
-                    "品名": "（定型文）",
-                    "数量": "", "単位": "", "単価": "", "小計": 0,
-                    "種別": "メモ",
-                    "備考": p  # 1項目＝1行
-                })
+    for i, p in enumerate(PHRASES[half:]):
+        if st.checkbox(p, key=pref+f"phr_R_{i}"):
+            phr_sel.append(p)
+
+# ← ここから with の外（インデントを戻す）
+if phr_sel:
+    for p in phr_sel:
+        overall_items.append({
+            "opening": idx,
+            "品名": "（定型文）",
+            "数量": "", "単位": "", "単価": "", "小計": 0,
+            "種別": "メモ",
+            "備考": p  # 1項目＝1行
+        })
 
     else:
         st.caption("※このカーテン構成では部材の追加は行いません。")
@@ -867,31 +870,31 @@ def export_to_template(out_path: str, items: list[dict], header: dict, ship_meth
         row += 1
 
     if ship_method:
-        ws0[f"A{row}"] = "運賃・梱包 " + ship_method
-        ws0[f"F{row}"] = 1
-        ws0[f"G{row}"] = f"=H{row}"
-        ws0[f"H{row}"] = int(ship_fee)
-        row += 1
+    ws0[f"A{row}"] = "運賃・梱包 " + ship_method
+    ws0[f"F{row}"] = 1
+    ws0[f"G{row}"] = f"=H{row}"
+    ws0[f"H{row}"] = int(ship_fee)
+    row += 1
 
-    # 見積書1〜5：11行目は触らず、12〜44（33行/頁）
-        def lines_for_opening(grp: list[dict]):
-        lines = []
-        # 先に通常行（品名・数量・単位・単価）
-        for it in grp:
-            if it.get("種別") != "メモ":
-                lines.append((
-                    it.get("品名", ""),
-                    it.get("数量", ""),
-                    it.get("単位", ""),
-                    it.get("単価", ""),
-                ))
-        # 後ろにメモ行（定型句を1項目＝1行）
-        for it in grp:
-            if it.get("種別") == "メモ":
-                txt = it.get("備考", "")
-                if txt:
-                    lines.append((txt, "", "", ""))
-        return lines
+# 見積書1〜5：11行目は触らず、12〜44（33行/頁）
+def lines_for_opening(grp: list[dict]):
+    lines = []
+    # 先に通常行（品名・数量・単位・単価）
+    for it in grp:
+        if it.get("種別") != "メモ":
+            lines.append((
+                it.get("品名", ""),
+                it.get("数量", ""),
+                it.get("単位", ""),
+                it.get("単価", ""),
+            ))
+    # 後ろにメモ行（定型句を1項目＝1行）
+    for it in grp:
+        if it.get("種別") == "メモ":
+            txt = it.get("備考", "")
+            if txt:
+                lines.append((txt, "", "", ""))
+    return lines
 
     all_opening_lines = [lines_for_opening(grp) for grp in opening_groups]
 
