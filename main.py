@@ -723,29 +723,31 @@ def render_opening(idx: int):
                         overall_total_update(subtotal)
             st.session_state[rows_key] = updated_rows
 
-        # 定型文（間口末尾A列へ1行で出力）
+                # 定型文（間口末尾A列へ1行で出力）
         st.markdown("##### 定型文")
         phr_sel = []
         colL, colR = st.columns(2)
-        half = (len(PHRASES)+1)//2
+        half = (len(PHRASES) + 1) // 2
         with colL:
             for i, p in enumerate(PHRASES[:half]):
-                if st.checkbox(p, key=pref+f"phr_L_{i}"): phr_sel.append(p)
+                if st.checkbox(p, key=pref + f"phr_L_{i}"):
+                    phr_sel.append(p)
         with colR:
-    for i, p in enumerate(PHRASES[half:]):
-        if st.checkbox(p, key=pref+f"phr_R_{i}"):
-            phr_sel.append(p)
+            for i, p in enumerate(PHRASES[half:]):
+                if st.checkbox(p, key=pref + f"phr_R_{i}"):
+                    phr_sel.append(p)
 
-# ← ここから with の外（インデントを戻す）
-if phr_sel:
-    for p in phr_sel:
-        overall_items.append({
-            "opening": idx,
-            "品名": "（定型文）",
-            "数量": "", "単位": "", "単価": "", "小計": 0,
-            "種別": "メモ",
-            "備考": p  # 1項目＝1行
-        })
+        # ← with の外で 1 項目 = 1 行 で明細化（インデント注意）
+        if phr_sel:
+            for p in phr_sel:
+                overall_items.append({
+                    "opening": idx,
+                    "品名": "（定型文）",
+                    "数量": "", "単位": "", "単価": "", "小計": 0,
+                    "種別": "メモ",
+                    "備考": p
+                })
+
 
     else:
         st.caption("※このカーテン構成では部材の追加は行いません。")
@@ -856,51 +858,50 @@ def export_to_template(out_path: str, items: list[dict], header: dict, ship_meth
     write_merged_safe(ws0, "A8", header["person_name"])
     write_merged_safe(ws0, "B17", header["project_name"])
 
-    # 見積書0：21〜 に間口合計（A/F/G/H）→ 末尾に運賃梱包（空行なし）
+        # 見積書0：21〜 に間口合計（A/F/G/H）→ 末尾に運賃梱包（空行なし）
     row = 21
     opening_groups = split_by_opening(items)
-    opening_memos = {}  # opening -> memo_text（※定型文のみ集計）
     for grp in opening_groups:
-        name, total, memo_text = opening_summary(grp)
+        name, total, _ = opening_summary(grp)  # 定型文まとめは使わない
         ws0[f"A{row}"] = name
         ws0[f"F{row}"] = 1
         ws0[f"G{row}"] = f"=H{row}"
         ws0[f"H{row}"] = total
-        opening_memos[grp[0].get("opening")] = memo_text
         row += 1
 
     if ship_method:
-    ws0[f"A{row}"] = "運賃・梱包 " + ship_method
-    ws0[f"F{row}"] = 1
-    ws0[f"G{row}"] = f"=H{row}"
-    ws0[f"H{row}"] = int(ship_fee)
-    row += 1
+        ws0[f"A{row}"] = "運賃・梱包 " + ship_method
+        ws0[f"F{row}"] = 1
+        ws0[f"G{row}"] = f"=H{row}"
+        ws0[f"H{row}"] = int(ship_fee)
+        row += 1
 
-# 見積書1〜5：11行目は触らず、12〜44（33行/頁）
-def lines_for_opening(grp: list[dict]):
-    lines = []
-    # 先に通常行（品名・数量・単位・単価）
-    for it in grp:
-        if it.get("種別") != "メモ":
-            lines.append((
-                it.get("品名", ""),
-                it.get("数量", ""),
-                it.get("単位", ""),
-                it.get("単価", ""),
-            ))
-    # 後ろにメモ行（定型句を1項目＝1行）
-    for it in grp:
-        if it.get("種別") == "メモ":
-            txt = it.get("備考", "")
-            if txt:
-                lines.append((txt, "", "", ""))
-    return lines
+    # 見積書1〜5：11行目は触らず、12〜44（33行/頁）
+    def lines_for_opening(grp: list[dict]):
+        lines = []
+        # 先に通常行（品名・数量・単位・単価）
+        for it in grp:
+            if it.get("種別") != "メモ":
+                lines.append((
+                    it.get("品名", ""),
+                    it.get("数量", ""),
+                    it.get("単位", ""),
+                    it.get("単価", ""),
+                ))
+        # 後ろにメモ行（定型句 1 項目 = 1 行）
+        for it in grp:
+            if it.get("種別") == "メモ":
+                txt = it.get("備考", "")
+                if txt:
+                    lines.append((txt, "", "", ""))
+        return lines
 
     all_opening_lines = [lines_for_opening(grp) for grp in opening_groups]
 
-    PAGES = [wb[f"見積書{i}"] for i in range(1,6)]
+    PAGES = [wb[f"見積書{i}"] for i in range(1, 6)]
     page_idx = 0
     row_in_page = 12
+
     def new_page():
         nonlocal page_idx, row_in_page
         page_idx += 1
@@ -910,6 +911,7 @@ def lines_for_opening(grp: list[dict]):
         block_len = len(op_lines)
         if block_len == 0:
             continue
+        # 1間口 ≤ 33行ならページ跨ぎ禁止（今のページに入らなければ改ページ）
         if block_len <= 33 and (row_in_page + block_len - 1) > 44:
             new_page()
         while op_lines:
@@ -919,7 +921,7 @@ def lines_for_opening(grp: list[dict]):
             remain = 44 - row_in_page + 1
             take = min(len(op_lines), remain)
             chunk, op_lines = op_lines[:take], op_lines[take:]
-            for a,f,g,h in chunk:
+            for a, f, g, h in chunk:
                 ws[f"A{row_in_page}"] = a
                 ws[f"F{row_in_page}"] = f
                 ws[f"G{row_in_page}"] = g
@@ -928,12 +930,13 @@ def lines_for_opening(grp: list[dict]):
             if op_lines:
                 new_page()
 
-    used_pages = page_idx + (1 if row_in_page>12 else 0)
+    used_pages = page_idx + (1 if row_in_page > 12 else 0)
     if used_pages > 5:
         raise RuntimeError(f"明細ページが5ページを超えました（使用{used_pages}ページ）。")
 
     os.makedirs(osp.dirname(out_path), exist_ok=True)
     wb.save(out_path)
+
 
 # ===== 保存UI =====
 st.markdown("---")
