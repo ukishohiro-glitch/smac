@@ -149,11 +149,15 @@ def smac_estimate(middle_name: str, open_method: str, W: int, H: int, cnt: int,
         return res
 
     if open_method == "片引き":
-        cur_w = W * 1.05; panels = 1
-    else:
-        cur_w = (W/2) * 1.05; panels = 2
-    cur_h = H + 50
-    res["curtain_w"] = int(round(cur_w))
+    cur_w = W * 1.05; panels = 1
+else:
+    cur_w = (W/2) * 1.05; panels = 2
+# 引分け時のカーテン幅は 10mm 単位で切り捨て（例: 4725 → 4720）
+if panels == 2:
+    cur_w = (int(cur_w) // 10) * 10
+cur_h = H + 50
+res["curtain_w"] = int(round(cur_w))
+
     res["curtain_h"] = int(round(cur_h))
 
     length_per_panel_m = (cur_h * 1.2) / 1000.0
@@ -553,16 +557,29 @@ def render_opening(idx: int):
                     "種別": "寸法",
                     "備考": ""
                 })
-                # 行3: カーテン寸法（ここに数量/単価/小計）
-                overall_items.append({
-                    "opening": idx,
-                    "品名": f"カーテン寸法：W{sm['curtain_w']}×H{sm['curtain_h']}mm",
-                    "数量": CNT, "単位": "式",
-                    "単価": sm["sell_one"], "小計": sm["sell_total"],
-                    "種別": "寸法",
-                    "備考": ("OP：" + "・".join(sm["note_ops"])) if sm["note_ops"] else ""
-                })
-                overall_total_update(sm["sell_total"])
+                # 行3: カーテン寸法（価格行）
+if (st.session_state.get(pref+'open') == "引分け"):
+    # 2枚・1枚単価表記にする（合計がズレないよう 端数は四捨五入）
+    qty_panels = 2 * CNT
+    unit_per_panel = int(round(sm["sell_total"] / qty_panels)) if qty_panels else int(sm["sell_one"] // 2)
+    overall_items.append({
+        "opening": idx,
+        "品名": f"カーテン寸法：W{sm['curtain_w']}×H{sm['curtain_h']}mm（カーテン2枚）",
+        "数量": qty_panels, "単位": "枚",
+        "単価": unit_per_panel, "小計": unit_per_panel * qty_panels,
+        "種別": "寸法",
+        "備考": ("OP：" + "・".join(sm["note_ops"])) if sm["note_ops"] else ""
+    })
+else:
+    # 片引き：従来通り 1 式
+    overall_items.append({
+        "opening": idx,
+        "品名": f"カーテン寸法：W{sm['curtain_w']}×H{sm['curtain_h']}mm",
+        "数量": CNT, "単位": "式",
+        "単価": sm["sell_one"], "小計": sm["sell_total"],
+        "種別": "寸法",
+        "備考": ("OP：" + "・".join(sm["note_ops"])) if sm["note_ops"] else ""
+    })
 
                 # UIのみの原価明細
                 with st.expander(f"間口 {idx}：S・MAC 原価明細（UI表示のみ・Excel非出力）", expanded=False):
@@ -583,22 +600,28 @@ def render_opening(idx: int):
         elif large=="エア・セーブ" and air_type:
             # 共通ヘルパ：品名行＋間口寸法行（価格は寸法行へ）
             def push_two_lines(title, price_one, total, note_extra=""):
-                # 行1: 品名（空）
-                overall_items.append({
-                    "opening": idx,
-                    "品名": title,
-                    "数量": "", "単位":"", "単価":"", "小計": 0,
-                    "種別": f"エア・セーブ{air_type}",
-                    "備考": (f"符号:{mark}" if mark else "")
-                })
-                # 行2: 間口寸法（ここに価格）
-                overall_items.append({
-                    "opening": idx,
-                    "品名": f"間口寸法：W{W}×H{H}mm",
-                    "数量": CNT, "単位":"式", "単価": price_one, "小計": total,
-                    "種別": "寸法", "備考": note_extra
-                })
-                overall_total_update(total)
+    # 性能・リブの表示をタイトル側に寄せる
+    perf_tag = f"（性能:{perf}）" if perf else ""
+    rib_tag  = f"（{st.session_state.get(pref+'rib')}）" if st.session_state.get(pref+'rib') else ""
+    full_title = f"{title}{perf_tag}{rib_tag}"
+
+    # 行1: 品名（空）
+    overall_items.append({
+        "opening": idx,
+        "品名": full_title,
+        "数量": "", "単位":"", "単価":"", "小計": 0,
+        "種別": f"エア・セーブ{air_type}",
+        "備考": (f"符号:{mark}" if mark else "")
+    })
+    # 行2: 間口寸法（ここに価格）
+    note = note_extra  # 必要なら追加備考を渡す
+    overall_items.append({
+        "opening": idx,
+        "品名": f"間口寸法：W{W}×H{H}mm",
+        "数量": CNT, "単位":"式", "単価": price_one, "小計": total,
+        "種別": "寸法", "備考": note
+    })
+    overall_total_update(total)
 
             if air_type=="MA" and air_item and perf:
                 r = area_price(df_ma, air_item, perf, W, H, CNT)
@@ -624,13 +647,26 @@ def render_opening(idx: int):
                     ] if x])
                     push_two_lines(title, r["price_one"], r["price_one"]*CNT, note)
                     # レールは従来通り単独行（寸法行は付けない）
-                    rail = mc_slide_rail_price(W, CNT)
-                    overall_items.append({
-                        "opening": idx,
-                        "品名": "スライドレール", "数量": 1, "単位":"式", "単価": rail, "小計": rail,
-                        "種別":"エア・セーブMC", "備考": "W×2を2000mm刻み"
-                    })
-                    overall_total_update(rail)
+                    # スライドレール（長さ明記。0m もそのまま表示）
+rail_len_mm = int(math.ceil((W*2)/2000.0)*2000) if W>0 else 0
+rail_price = int((rail_len_mm/1000.0)*7400) * CNT if rail_len_mm>0 else 0
+rail_len_tag = f"（{int(rail_len_mm/1000)}m）"
+overall_items.append({
+    "opening": idx,
+    "品名": f"スライドレール{rail_len_tag}",
+    "数量": 1, "単位":"式", "単価": rail_price, "小計": rail_price,
+    "種別":"エア・セーブMC", "備考": "W×2 を 2000mm 刻みで切上げ"
+})
+overall_total_update(rail_price)
+
+# 引き紐（記載が必要。金額が表に無ければ 0 円で行のみ出す）
+overall_items.append({
+    "opening": idx,
+    "品名": "引き紐",
+    "数量": 1, "単位":"式", "単価": 0, "小計": 0,
+    "種別":"エア・セーブMC", "備考": ""
+})
+
 
             elif air_type=="ME" and perf:
                 total_me = 0
